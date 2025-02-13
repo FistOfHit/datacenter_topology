@@ -1,0 +1,35 @@
+{
+    # Server configuration
+    "server_name": "XE9680",
+    "num_server": 32,
+    "aggregate_server_bandwidth_gb": 3200,
+    "server_num_ports": 8,
+    "server_port_bandwidth_gb": 400,
+    "server_to_leaf_num_cables": 1,
+    "server_to_leaf_cable_bandwidth_gb": 400,
+    
+    # Leaf switch configuration
+    "leaf_name": "QM9770-L",
+    "num_leaf": 8,
+    "aggregate_leaf_bandwidth_gb": 25600,
+    "leaf_num_ports": 32,
+    "leaf_port_bandwidth_gb": 800,
+    "leaf_to_spine_num_cables": 4,
+    "leaf_to_spine_cable_bandwidth_gb": 800,
+    
+    # Spine switch configuration
+    "spine_name": "QM9770-S",
+    "num_spine": 2,
+    "aggregate_spine_bandwidth_gb": 25600,
+    "spine_num_ports": 32,
+    "spine_port_bandwidth_gb": 800,
+    "spine_to_core_num_cables": 0,
+    "spine_to_core_cable_bandwidth_gb": 0,
+
+    # Core switch configuration
+    "core_name": "QM9770-C",
+    "num_core": 0,
+    "aggregate_core_bandwidth_gb": 25600,
+    "core_num_ports": 32,
+    "core_port_bandwidth_gb": 800
+}
