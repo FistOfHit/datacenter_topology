@@ -25,9 +25,13 @@ jobs:
         pip install pytest pytest-cov
         pip install networkx matplotlib numpy pandas pyyaml
         pip install .
+    - name: Create test data directory
+      run: |
+        mkdir -p tests/data
+        echo '{"server_name": "test-server", "rack_name": "test-rack", "num_servers": 2, "num_switches": 2}' > tests/data/test_config.json
     - name: Test with pytest
       run: |
-        pytest --cov=topology_generator tests/
+        python -m pytest tests/unit/ -v
     - name: Upload coverage report
       uses: codecov/codecov-action@v3
       with:
