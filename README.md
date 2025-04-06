@@ -18,7 +18,7 @@ This project provides a flexible framework for creating and analyzing datacenter
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - Required Python packages (installed automatically):
   - matplotlib
   - networkx
@@ -121,7 +121,7 @@ pytest tests/unit/test_topology_generator.py
 
 This project uses GitHub Actions for continuous integration:
 
-1. **Testing Workflow**: Automatically runs tests on Python 3.10 for all pushes to main and pull requests.
+1. **Testing Workflow**: Automatically runs tests on Python 3.12 for all pushes to main and pull requests.
 2. **Linting Workflow**: Checks code quality using ruff.
 
 ### Code Quality
