@@ -21,5 +21,14 @@ jobs:
         pip install ruff
     - name: Lint with ruff
       run: |
-        ruff check .
-        ruff format --check .
+        ruff check --fix .
+        ruff format .
+    - name: Commit fixes if any
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        git add -A
+        git diff --quiet && git diff --staged --quiet || git commit -m "Auto fix linting issues"
+        git push
+      # Only run this step if this is a push to the main branch (not on PRs)
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
