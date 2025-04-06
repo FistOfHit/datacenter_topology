@@ -1,5 +1,6 @@
 import networkx as nx
 from pathlib import Path
+from typing import Dict, List, Any, Tuple
 
 
 def export_network_to_vdx(G: nx.Graph, output_file: str):
@@ -46,7 +47,7 @@ def export_network_to_vdx(G: nx.Graph, output_file: str):
     }
 
     # Group nodes by type and store positions
-    nodes_by_type = {}
+    nodes_by_type: Dict[str, List[Tuple[str, Any]]] = {}
     node_positions = {}
     for node, attrs in G.nodes(data=True):
         node_type = attrs["type"]
@@ -60,7 +61,8 @@ def export_network_to_vdx(G: nx.Graph, output_file: str):
         y_pos = layers[node_type]
         num_nodes = len(nodes)
 
-        for idx, (node, attrs) in enumerate(nodes):
+        for idx, node_data in enumerate(nodes):
+            node, attrs = node_data
             x_pos = 2 + (8 * (idx + 1) / (num_nodes + 1))
             node_positions[node] = (x_pos, y_pos)
             attrs["shape_id"] = shape_id

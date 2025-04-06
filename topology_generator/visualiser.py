@@ -207,7 +207,7 @@ def calculate_node_positions(
     Returns:
         Dict[str, Tuple[float, float]]: The node positions.
     """
-    positions = {}
+    positions: dict[str, tuple[float, float]] = {}
     min_spacing = 1.2
 
     if len(nodes) > 4:
@@ -218,7 +218,10 @@ def calculate_node_positions(
         total_width = (len(nodes) - 1) * min_spacing
         start_x = -total_width / 2
         for idx, node in enumerate(nodes):
-            positions[node] = (start_x + (idx * min_spacing), LAYER_HEIGHTS[node_type])
+            positions[node] = (
+                float(start_x + (idx * min_spacing)),
+                LAYER_HEIGHTS[node_type],
+            )
 
     return positions
 
@@ -322,7 +325,7 @@ def get_bandwidth_colors(G: nx.Graph) -> Dict[str, str]:
     return bandwidth_colors
 
 
-def visualize_topology(G: nx.Graph, output_dir: str = None):
+def visualize_topology(G: nx.Graph, output_dir: str | None = None):
     """
     Visualize the network topology graph with colored edges based on bandwidth.
 

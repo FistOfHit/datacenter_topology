@@ -10,16 +10,17 @@ def get_timestamped_dir(base_dir: str) -> str:
     """
     Create and return a timestamped subdirectory within the base directory.
 
-    Params:
-        base_dir (str): The base directory to create the timestamped subdirectory in.
+    Args:
+        base_dir: The base directory to create the timestamped subdirectory in.
 
     Returns:
-        str: The path to the timestamped subdirectory.
+        The path to the timestamped subdirectory.
     """
     # Create timestamp string in format: YYYYMMDD_HHMMSS
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(base_dir, timestamp)
 
+    # Create directory if it doesn't exist
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     return output_dir
@@ -27,13 +28,17 @@ def get_timestamped_dir(base_dir: str) -> str:
 
 def load_config_from_file(config_path: str) -> Dict[str, Any]:
     """
-    Loads configuration from a YAML file.
+    Load configuration from a YAML file.
 
-    Params:
-        config_path (str): The path to the YAML configuration file.
+    Args:
+        config_path: The path to the YAML configuration file.
 
     Returns:
-        Dict[str, Any]: The loaded configuration as a dictionary.
+        The loaded configuration as a dictionary.
+
+    Raises:
+        FileNotFoundError: If the configuration file doesn't exist.
+        yaml.YAMLError: If the YAML file has invalid syntax.
     """
     try:
         with open(config_path, "r") as f:

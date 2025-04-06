@@ -6,13 +6,16 @@ import os
 
 def setup_logging(args: argparse.Namespace) -> logging.Logger:
     """
-    Set up logging configuration with the provided output directory.
+    Set up logging configuration for the application.
 
-    Params:
-        args: argparse.Namespace
+    Configures logging to output to both console and a log file in the
+    specified output directory.
+
+    Args:
+        args: Command line arguments containing output_dir.
 
     Returns:
-        logging.Logger
+        logging.Logger: Configured logger instance.
     """
     logging.basicConfig(
         level=logging.INFO,
