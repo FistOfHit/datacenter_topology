@@ -26,3 +26,13 @@ repos:
     hooks:
     -   id: poetry-check
         language_version: python3.12
+
+-   repo: local
+    hooks:
+    -   id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        types: [python]

@@ -73,3 +73,6 @@ authors = ["Hitesh Kumar <hitesh.kumar@computacenter.com>"]
 python = "^3.12"  # Specify your Python version requirement
 
 # Add your other dependencies here
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^3.6.0"

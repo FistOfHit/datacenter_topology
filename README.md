@@ -146,8 +146,30 @@ The pre-commit configuration includes:
 - Trailing whitespace removal
 - End-of-file fixer
 - YAML syntax checking
-- Ruff linting and formatting
+- Ruff linting and formatting (with auto-fixing enabled)
 - MyPy type checking
+- Poetry dependency checking
+- Pytest automatic test running
+
+To set up pre-commit hooks:
+
+```bash
+# If using pip
+pip install pre-commit
+pre-commit install
+
+# If using Poetry (recommended)
+poetry add --group dev pre-commit
+poetry run pre-commit install
+```
+
+After installation, the hooks will run automatically on every commit. If you want to run them manually on all files:
+
+```bash
+pre-commit run --all-files
+```
+
+The hooks will automatically fix many issues for you, including code formatting and simple linting errors. This ensures that all code pushed to the repository meets the project's standards.
 
 ## Project Structure
 
