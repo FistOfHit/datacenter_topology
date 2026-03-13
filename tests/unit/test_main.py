@@ -1,62 +1,61 @@
-import os
-import sys
+from unittest.mock import patch
 
-# Add the parent directory to the path so we can import the modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import pandas as pd
+import yaml
 
-from unittest.mock import patch, MagicMock
 from topology_generator.main import main
 
 
-@patch("topology_generator.main.generate_topology")
-@patch("topology_generator.main.visualize_topology")
-@patch("topology_generator.main.create_port_mapping")
-@patch("topology_generator.main.save_to_csv")
-@patch("topology_generator.main.save_to_excel")
-@patch("topology_generator.main.export_network_to_vdx")
-@patch("topology_generator.main.load_config_from_file")
-@patch("topology_generator.main.parse_args")
-@patch("topology_generator.main.setup_logging")
-def test_main(
-    mock_setup_logging,
-    mock_parse_args,
-    mock_load_config,
-    mock_export,
-    mock_save_excel,
-    mock_save_csv,
-    mock_create_mapping,
-    mock_visualize,
-    mock_generate,
-):
-    """Test the main function."""
-    # Setup mocks
-    mock_args = MagicMock()
-    mock_args.config = "config.yaml"
-    mock_args.output_dir = "output_dir"
-    mock_parse_args.return_value = mock_args
+def test_main_creates_outputs(tmp_path, sample_config_file):
+    output_dir = tmp_path / "outputs"
 
-    mock_logger = MagicMock()
-    mock_setup_logging.return_value = mock_logger
+    with patch(
+        "sys.argv",
+        [
+            "main.py",
+            "--config",
+            str(sample_config_file),
+            "--output-dir",
+            str(output_dir),
+        ],
+    ):
+        main()
 
-    mock_config = {"key": "value"}
-    mock_load_config.return_value = mock_config
+    assert (output_dir / "topology.png").exists()
+    assert (output_dir / "port_mapping.xlsx").exists()
+    assert (output_dir / "network_topology.log").exists()
 
-    mock_topology = MagicMock()
-    mock_generate.return_value = mock_topology
+    excel_data = pd.read_excel(output_dir / "port_mapping.xlsx")
+    assert len(excel_data) == 9
 
-    mock_port_mapping = [{"source": "server1", "target": "leaf1"}]
-    mock_create_mapping.return_value = mock_port_mapping
 
-    # Call the function
-    main()
+def test_main_logs_and_reraises_errors(tmp_path, sample_two_layer_config):
+    output_dir = tmp_path / "outputs"
+    invalid_config_path = tmp_path / "invalid.yaml"
+    invalid_config = dict(sample_two_layer_config)
+    invalid_layers = [dict(layer) for layer in sample_two_layer_config["layers"]]
+    invalid_layers[0]["uplink_cable_bandwidth_gb"] = 0
+    invalid_config["layers"] = invalid_layers
+    invalid_config_path.write_text(yaml.safe_dump(invalid_config), encoding="utf-8")
 
-    # Verify all the expected functions were called
-    mock_parse_args.assert_called_once()
-    mock_setup_logging.assert_called_once_with(mock_args)
-    mock_load_config.assert_called_once_with(mock_args.config)
-    mock_generate.assert_called_once_with(mock_config)
-    mock_visualize.assert_called_once_with(mock_topology, mock_args.output_dir)
-    mock_create_mapping.assert_called_once_with(mock_topology)
-    mock_save_csv.assert_called_once_with(mock_port_mapping, mock_args.output_dir)
-    mock_save_excel.assert_called_once_with(mock_port_mapping, mock_args.output_dir)
-    mock_export.assert_called_once_with(mock_topology, mock_args.output_dir)
+    with patch(
+        "sys.argv",
+        [
+            "main.py",
+            "--config",
+            str(invalid_config_path),
+            "--output-dir",
+            str(output_dir),
+        ],
+    ):
+        try:
+            main()
+        except Exception as exc:
+            error = exc
+        else:
+            error = None
+
+    assert error is not None
+    assert "must be greater than zero" in str(error)
+    log_contents = (output_dir / "network_topology.log").read_text(encoding="utf-8")
+    assert "Error during execution" in log_contents

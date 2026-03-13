@@ -1,9 +1,4 @@
-import os
-import sys
 from unittest.mock import patch
-
-# Add the parent directory to sys.path for module imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from topology_generator.argparser import parse_args
 
@@ -40,3 +35,15 @@ def test_parse_args_custom():
             args = parse_args()
             assert args.config == "custom_config.yaml"
             assert args.output_dir == "custom_output"
+
+
+def test_parse_args_applies_timestamp():
+    with patch("sys.argv", ["main.py", "--timestamp", "--output-dir", "base_output"]):
+        with patch(
+            "topology_generator.argparser.get_timestamped_dir",
+            return_value="base_output/20260313_120000",
+        ) as mock_get_timestamped_dir:
+            args = parse_args()
+
+    mock_get_timestamped_dir.assert_called_once_with("base_output")
+    assert args.output_dir == "base_output/20260313_120000"

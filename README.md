@@ -1,213 +1,154 @@
-# Datacenter Network Topology Generator
+# Datacenter Topology Generator
 
-A Python tool for generating, visualizing, and exporting datacenter network topologies.
+Generate datacenter network topologies from YAML, visualize them as a condensed diagram, and export a per-cable Excel cut-sheet.
 
-## Overview
+## What This Repo Does
 
-This project provides a flexible framework for creating and analyzing datacenter network topologies. It allows users to define various network parameters and generates a complete network topology with proper connections between different layers (servers, leaf switches, spine switches, and core switches).
+The tool builds a layered `networkx` model from an ordered list of generic layers. Layer order defines topology semantics:
 
-## Features
+- layer `0` is the bottom of the fabric
+- layer `N-1` is the top of the fabric
+- links are only modeled between adjacent layers
 
-- Generate multi-tier datacenter network topologies
-- Visualize network topologies with matplotlib
-- Export topologies to Visio (VDX) format
-- Create port mappings and cut-sheets in CSV and Excel formats
-- Calculate bandwidth and port utilization statistics
+From that model it produces:
 
-## Installation
+- `topology.png`
+- `port_mapping.xlsx`
+- `network_topology.log`
+
+The CLI contract is unchanged:
+
+```bash
+python -m topology_generator.main --config <config.yaml> --output-dir <output_dir> [--timestamp]
+```
+
+Installed console entry point:
+
+```bash
+topology-generator --config <config.yaml> --output-dir <output_dir> [--timestamp]
+```
+
+## Quick Start
 
 ### Prerequisites
 
-- Python 3.12 or higher
-- Required Python packages (installed automatically):
-  - matplotlib
-  - networkx
-  - numpy
-  - pandas
-  - pyyaml
-  - ruff
+- Python 3.12+
 
-### Setup
+### Install
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/FistOfHit/datacenter_topology.git
-   cd datacenter_topology
-   ```
-
-2. Install the package and dependencies:
-   ```bash
-   pip install -e .
-   ```
-
-3. (Optional) Set up pre-commit hooks for development:
-   ```bash
-   pip install pre-commit
-   pre-commit install
-   ```
-
-## Usage
-
-### Basic Usage
-
-Run the topology generator with the default configuration:
+Runtime install:
 
 ```bash
-python -m topology_generator.main --config config.yaml
+make install
 ```
 
-### Custom Configuration
-
-Create a custom YAML configuration file and specify it when running:
+Development install:
 
 ```bash
-python -m topology_generator.main --config custom_config.yaml --output-dir my_output
+make install-dev
+pre-commit install
 ```
 
-### Configuration Parameters
+### Run
 
-Example configuration (see `config.yaml` for a complete example):
+```bash
+python -m topology_generator.main --config config.yaml --output-dir output
+```
+
+Timestamped output directory:
+
+```bash
+python -m topology_generator.main --config config.yaml --output-dir output --timestamp
+```
+
+## Configuration
+
+The input is a YAML mapping with a single ordered `layers:` list. Each layer defines its own node count, shared port capacity, and connectivity to the adjacent layers above and below it.
+
+Example:
 
 ```yaml
-# Number of devices at each layer
-num_server: 16
-num_leaf: 4
-num_spine: 2
-num_core: 1
+layers:
+  - name: gpu_server
+    node_count_in_layer: 16
+    ports_per_node: 4
+    port_bandwidth_gb_per_port: 400
+    uplink_cables_per_node_to_each_node_in_next_layer: 1
+    uplink_cable_bandwidth_gb: 400
 
-# Port bandwidth for each device type (in Gbps)
-server_port_bandwidth_gb: 10
-leaf_port_bandwidth_gb: 40
-spine_port_bandwidth_gb: 100
-core_port_bandwidth_gb: 100
+  - name: leaf_sw
+    node_count_in_layer: 4
+    ports_per_node: 18
+    port_bandwidth_gb_per_port: 800
+    downlink_cables_per_node_to_each_node_in_previous_layer: 1
+    downlink_cable_bandwidth_gb: 400
+    uplink_cables_per_node_to_each_node_in_next_layer: 1
+    uplink_cable_bandwidth_gb: 800
 
-# Connection parameters between layers
-server_to_leaf_num_cables: 1
-server_to_leaf_cable_bandwidth_gb: 10
-leaf_to_spine_num_cables: 2
-leaf_to_spine_cable_bandwidth_gb: 40
-spine_to_core_num_cables: 2
-spine_to_core_cable_bandwidth_gb: 100
+  - name: spine_sw
+    node_count_in_layer: 2
+    ports_per_node: 6
+    port_bandwidth_gb_per_port: 800
+    downlink_cables_per_node_to_each_node_in_previous_layer: 1
+    downlink_cable_bandwidth_gb: 800
+    uplink_cables_per_node_to_each_node_in_next_layer: 2
+    uplink_cable_bandwidth_gb: 800
+
+  - name: core_sw
+    node_count_in_layer: 1
+    ports_per_node: 4
+    port_bandwidth_gb_per_port: 800
+    downlink_cables_per_node_to_each_node_in_previous_layer: 2
+    downlink_cable_bandwidth_gb: 800
 ```
 
-## Output
+More detail:
 
-The tool generates the following outputs in the specified output directory:
+- [Configuration Reference](docs/configuration.md)
+- [Worked Examples](docs/examples.md)
 
-- `topology.png`: Visualization of the network topology
-- `port_mapping.csv`: CSV file with port mapping details
-- `port_mapping.xlsx`: Excel file with port mapping details
-- `topology.vdx`: Visio file with the network topology
-- Log files with detailed execution information
+## How It Works
+
+1. Parse CLI arguments.
+2. Create the output directory and configure logging.
+3. Load YAML into a validated `TopologyConfig`.
+4. Build a `networkx.Graph` across the ordered layers.
+5. Connect each layer densely to the next layer using the configured per-pair cable count.
+6. Render the condensed topology diagram.
+7. Flatten graph edges into per-cable Excel rows.
+
+Design details:
+
+- [Architecture Overview](docs/architecture.md)
+- [Agent Guide](AGENTS.md)
 
 ## Development
 
-### Testing
-
-This project uses pytest for testing. To run the tests:
+Helpful commands:
 
 ```bash
-# Run all tests
-pytest
-
-# Run with coverage report
-pytest --cov=topology_generator tests/
-
-# Run specific test files
-pytest tests/unit/test_topology_generator.py
+make lint
+make test
+make check
+make format
 ```
 
-### Continuous Integration
+The repository includes:
 
-This project uses GitHub Actions for continuous integration:
+- `Ruff` for linting and formatting
+- `pytest` for behavior-first testing
+- `mypy` configuration for static analysis
+- `pre-commit` hooks for local quality gates
+- GitHub Actions for lint and test CI
 
-1. **Testing Workflow**: Automatically runs tests on Python 3.12 for all pushes to main and pull requests.
-2. **Linting Workflow**: Checks code quality using ruff.
+## Notes and Constraints
 
-### Code Quality
-
-We use several tools to maintain code quality:
-
-1. **Ruff**: For linting and formatting Python code
-2. **Pre-commit hooks**: To enforce code quality before commits
-3. **MyPy**: For static type checking
-
-To run linting manually:
-
-```bash
-ruff check .
-ruff format .
-```
-
-### Pre-commit Hooks
-
-The pre-commit configuration includes:
-
-- Trailing whitespace removal
-- End-of-file fixer
-- YAML syntax checking
-- Ruff linting and formatting (with auto-fixing enabled)
-- MyPy type checking
-- Poetry dependency checking
-- Pytest automatic test running
-
-To set up pre-commit hooks:
-
-```bash
-# If using pip
-pip install pre-commit
-pre-commit install
-
-# If using Poetry (recommended)
-poetry add --group dev pre-commit
-poetry run pre-commit install
-```
-
-After installation, the hooks will run automatically on every commit. If you want to run them manually on all files:
-
-```bash
-pre-commit run --all-files
-```
-
-The hooks will automatically fix many issues for you, including code formatting and simple linting errors. This ensures that all code pushed to the repository meets the project's standards.
-
-## Project Structure
-
-```
-datacenter_topology/
-├── configs/               # Configuration examples
-├── tests/                 # Test files
-│   ├── unit/              # Unit tests for each module
-│   └── test_integration.py # Integration tests
-├── topology_generator/    # Main package
-│   ├── __init__.py
-│   ├── argparser.py       # Command-line argument parsing
-│   ├── file_handler.py    # File operations
-│   ├── graph_exporter.py  # Export to Visio format
-│   ├── logger.py          # Logging setup
-│   ├── main.py            # Main entry point
-│   ├── port_mapper.py     # Port mapping generation
-│   ├── statistics_generator.py # Statistics calculation
-│   ├── topology_generator.py # Core topology generation
-│   └── visualiser.py      # Visualization functions
-├── .github/workflows/     # GitHub Actions CI configuration
-├── .pre-commit-config.yaml # Pre-commit hooks configuration
-├── config.yaml            # Default configuration
-├── pyproject.toml         # Project metadata and tool configuration
-└── README.md              # This file
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Run the tests to make sure everything works (`pytest`)
-4. Commit your changes (`git commit -m 'Add some amazing feature'`)
-5. Push to the branch (`git push origin feature/amazing-feature`)
-6. Open a Pull Request
+- The schema is generic and position-based; layer names are optional labels only.
+- Links are modeled only between adjacent layers in the ordered list.
+- The connection strategy is intentionally dense: every node in layer `i` attempts the configured number of links to every node in layer `i+1`.
+- Visualization is intentionally condensed for larger layers; it is a planning view, not a full physical layout renderer.
+- Generated outputs under `output/` and `review_runs/` are disposable.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT. See [LICENSE](LICENSE).

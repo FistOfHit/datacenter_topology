@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "topology_generator"
 version = "0.1.0"
-description = "A network topology generator and visualizer"
+description = "Generate, visualize, and export datacenter network topologies."
 authors = [
     { name = "Hitesh Kumar", email = "hitesh.kumar@computacenter.com" }
 ]
@@ -16,14 +16,26 @@ dependencies = [
     "matplotlib",
     "networkx",
     "numpy",
+    "openpyxl",
     "pandas",
-    "pytest",
     "pyyaml",
-    "ruff",
 ]
 
-[tool.setuptools]
-packages = ["topology_generator"]
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "types-PyYAML",
+]
+
+[project.scripts]
+topology-generator = "topology_generator.main:main"
+
+[tool.setuptools.packages.find]
+include = ["topology_generator*"]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
@@ -63,16 +75,17 @@ line-ending = "auto"
 docstring-code-format = false
 docstring-code-line-length = "dynamic"
 
-[tool.poetry]
-name = "datacenter_topology"
-version = "0.1.0"
-description = "A tool for generating datacenter network topologies"
-authors = ["Hitesh Kumar <hitesh.kumar@computacenter.com>"]
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
 
-[tool.poetry.dependencies]
-python = "^3.12"  # Specify your Python version requirement
-
-# Add your other dependencies here
-
-[tool.poetry.group.dev.dependencies]
-pre-commit = "^3.6.0"
+[tool.mypy]
+python_version = "3.12"
+packages = ["topology_generator"]
+check_untyped_defs = true
+exclude = ["tests/"]
+no_implicit_optional = true
+pretty = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_ignores = true

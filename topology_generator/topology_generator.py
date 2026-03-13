@@ -1,260 +1,224 @@
-import networkx as nx
 import logging
+import re
+from collections.abc import Mapping
 
+import networkx as nx
+
+from topology_generator.config_schema import (
+    TopologyConfig,
+    ensure_topology_config,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def normalize_node_name(name: str) -> str:
+    """
+    Normalize device names to lower snake case for node identifiers.
+
+    Args:
+        name: Raw device name from configuration.
+
+    Returns:
+        Normalized node-safe name.
+    """
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower())
+    normalized = re.sub(r"_+", "_", normalized)
+    return normalized.strip("_")
+
+
 def add_network_layer(
     network: nx.Graph,
-    config: dict,
-    layer_type: str,
-    bottom_layer_type: str | None,
-    top_layer_type: str | None,
-):
+    config: Mapping[str, object] | TopologyConfig,
+    layer_index: int,
+) -> list[str]:
     """
     Add a layer of nodes to the network topology.
 
-    Creates and adds nodes of a specific layer type (server, leaf, spine, core)
-    to the network graph with appropriate attributes.
-
     Args:
         network: The NetworkX graph to add nodes to.
-        config: Dictionary containing network configuration parameters.
-        layer_type: Type of layer to add (server, leaf, spine, core).
-        bottom_layer_type: Type of layer below this one (or None if bottom layer).
-        top_layer_type: Type of layer above this one (or None if top layer).
+        config: Topology configuration.
+        layer_index: Ordered layer index.
+
+    Returns:
+        The node ids created for the layer.
     """
-    # Configuration keys for this layer
-    num_nodes_key = f"num_{layer_type}"
-    aggregate_bw_key = f"aggregate_{layer_type}_bandwidth_gb"
-    num_ports_key = f"{layer_type}_num_ports"
-    port_bw_key = f"{layer_type}_port_bandwidth_gb"
+    topology_config = ensure_topology_config(config)
+    layer_config = topology_config.layer(layer_index)
+    logger.info(f"Adding {layer_config.node_count_in_layer} nodes to layer {layer_index}")
 
-    logger.info(f"Adding {config[num_nodes_key]} {layer_type}s to the network")
+    node_names: list[str] = []
+    node_base_name = normalize_node_name(layer_config.name)
+    if not node_base_name:
+        node_base_name = f"layer_{layer_index}"
 
-    # Add nodes with appropriate attributes
-    for i in range(config[num_nodes_key]):
-        node_name = f"{config[f'{layer_type}_name']}_{i+1}"
-
-        # Basic node attributes
+    for ordinal in range(layer_config.node_count_in_layer):
+        node_name = f"{node_base_name}_{ordinal + 1}"
         attrs = {
-            "type": layer_type,
-            "aggregate_bandwidth_gb": config[aggregate_bw_key],
-            "total_ports": config[num_ports_key],
-            "port_bandwidth_gb": config[port_bw_key],
+            "layer_index": layer_index,
+            "layer_name": layer_config.name,
+            "aggregate_bandwidth_gb": (
+                topology_config.derived_down_bandwidth_per_node(layer_index)
+                + topology_config.derived_up_bandwidth_per_node(layer_index)
+            ),
+            "aggregate_bandwidth_down": topology_config.derived_down_bandwidth_per_node(
+                layer_index
+            ),
+            "aggregate_bandwidth_up": topology_config.derived_up_bandwidth_per_node(
+                layer_index
+            ),
+            "total_ports": layer_config.ports_per_node,
+            "port_bandwidth_gb": layer_config.port_bandwidth_gb_per_port,
             "used_bandwidth_gb": 0.0,
             "used_ports_equivalent": 0.0,
             "next_available_port": 1,
         }
-
-        # Calculate aggregate bandwidth for connections to the layer underneath
-        attrs["aggregate_bandwidth_down"] = (
-            (
-                config[f"num_{bottom_layer_type}"]
-                * config[f"{bottom_layer_type}_to_{layer_type}_num_cables"]
-                * config[f"{bottom_layer_type}_to_{layer_type}_cable_bandwidth_gb"]
-            )
-            if bottom_layer_type
-            else 0
-        )
-
-        # Calculate aggregate bandwidth for connections to the layer above
-        attrs["aggregate_bandwidth_up"] = (
-            (
-                config[f"num_{top_layer_type}"]
-                * config[f"{layer_type}_to_{top_layer_type}_num_cables"]
-                * config[f"{layer_type}_to_{top_layer_type}_cable_bandwidth_gb"]
-            )
-            if top_layer_type
-            else 0
-        )
-
         network.add_node(node_name, **attrs)
+        node_names.append(node_name)
+
+    return node_names
 
 
 def add_connections(
-    G: nx.Graph,
-    source_layer: str,
-    target_layer: str,
-    config: dict,
-):
+    graph: nx.Graph,
+    lower_layer_index: int,
+    upper_layer_index: int,
+    config: Mapping[str, object] | TopologyConfig,
+    layer_nodes: dict[int, list[str]] | None = None,
+) -> None:
     """
-    Add network connections between two layers in the topology.
-
-    Creates edges between nodes in the source layer and nodes in the target layer,
-    assigning appropriate port numbers and tracking bandwidth usage.
-
-    Args:
-        G: The NetworkX graph to add connections to.
-        source_layer: The type of the source layer (e.g., "server", "leaf").
-        target_layer: The type of the target layer (e.g., "leaf", "spine").
-        config: Dictionary containing network configuration parameters.
+    Add connections between two adjacent layers in the topology.
     """
-    # Skip if either layer doesn't exist in the configuration
-    if (
-        config.get(f"num_{source_layer}", 0) == 0
-        or config.get(f"num_{target_layer}", 0) == 0
-    ):
+    topology_config = ensure_topology_config(config)
+    lower_layer = topology_config.layer(lower_layer_index)
+    num_cables = lower_layer.uplink_cables_per_node_to_each_node_in_next_layer
+    cable_bandwidth_gb = lower_layer.uplink_cable_bandwidth_gb
+
+    if num_cables == 0:
         logger.info(
-            f"Skipping connections between {source_layer} and {target_layer} - layers not present"
+            "Skipping connections between layer %s and layer %s because "
+            "uplink_cables_per_node_to_each_node_in_next_layer is zero",
+            lower_layer_index,
+            upper_layer_index,
         )
         return
 
-    # Get all nodes for each layer
-    source_nodes = [(n, d) for n, d in G.nodes(data=True) if d["type"] == source_layer]
-    target_nodes = [(n, d) for n, d in G.nodes(data=True) if d["type"] == target_layer]
+    layer_nodes = layer_nodes or {}
+    lower_node_names = layer_nodes.get(
+        lower_layer_index,
+        [
+            node
+            for node, data in graph.nodes(data=True)
+            if data["layer_index"] == lower_layer_index
+        ],
+    )
+    upper_node_names = layer_nodes.get(
+        upper_layer_index,
+        [
+            node
+            for node, data in graph.nodes(data=True)
+            if data["layer_index"] == upper_layer_index
+        ],
+    )
+    lower_nodes = [(name, graph.nodes[name]) for name in lower_node_names]
+    upper_nodes = [(name, graph.nodes[name]) for name in upper_node_names]
 
-    # Get connection parameters from config
-    num_cables = config[f"{source_layer}_to_{target_layer}_num_cables"]
-    cable_bandwidth_gb = config[f"{source_layer}_to_{target_layer}_cable_bandwidth_gb"]
-
-    for source, source_data in source_nodes:
-        for target, target_data in target_nodes:
-            source_port_list = []
-            target_port_list = []
+    for lower_node, lower_data in lower_nodes:
+        for upper_node, upper_data in upper_nodes:
+            lower_ports: list[int] = []
+            upper_ports: list[int] = []
 
             for _ in range(num_cables):
-                # Check if source has enough bandwidth available
                 if (
-                    source_data["used_bandwidth_gb"] + cable_bandwidth_gb
-                    > source_data["aggregate_bandwidth_gb"]
+                    lower_data["used_bandwidth_gb"] + cable_bandwidth_gb
+                    > lower_data["aggregate_bandwidth_gb"]
                 ):
                     logger.warning(
-                        f"Attempting to add a {cable_bandwidth_gb}G cable to {source}, "
-                        f"but only {source_data['aggregate_bandwidth_gb'] - source_data['used_bandwidth_gb']}G "
-                        f"is available"
+                        "Attempting to add a %sGB/s cable to %s, but only %sGB/s is available",
+                        cable_bandwidth_gb,
+                        lower_node,
+                        lower_data["aggregate_bandwidth_gb"]
+                        - lower_data["used_bandwidth_gb"],
                     )
                     continue
 
-                # Check if target has enough bandwidth available
                 if (
-                    target_data["used_bandwidth_gb"] + cable_bandwidth_gb
-                    > target_data["aggregate_bandwidth_gb"]
+                    upper_data["used_bandwidth_gb"] + cable_bandwidth_gb
+                    > upper_data["aggregate_bandwidth_gb"]
                 ):
                     logger.warning(
-                        f"Attempting to add a {cable_bandwidth_gb}G cable to {target}, "
-                        f"but only {target_data['aggregate_bandwidth_gb'] - target_data['used_bandwidth_gb']}G "
-                        f"is available"
+                        "Attempting to add a %sGB/s cable to %s, but only %sGB/s is available",
+                        cable_bandwidth_gb,
+                        upper_node,
+                        upper_data["aggregate_bandwidth_gb"]
+                        - upper_data["used_bandwidth_gb"],
                     )
                     continue
 
-                # Assign ports for this connection
-                source_port = source_data["next_available_port"]
-                target_port = target_data["next_available_port"]
+                lower_port = lower_data["next_available_port"]
+                upper_port = upper_data["next_available_port"]
+                lower_ports.append(lower_port)
+                upper_ports.append(upper_port)
 
-                source_port_list.append(source_port)
-                target_port_list.append(target_port)
+                lower_data["next_available_port"] += 1
+                upper_data["next_available_port"] += 1
+                lower_data["used_bandwidth_gb"] += cable_bandwidth_gb
+                upper_data["used_bandwidth_gb"] += cable_bandwidth_gb
 
-                # Update the next available port
-                source_data["next_available_port"] += 1
-                target_data["next_available_port"] += 1
-
-                # Update the used bandwidth
-                source_data["used_bandwidth_gb"] += cable_bandwidth_gb
-                target_data["used_bandwidth_gb"] += cable_bandwidth_gb
-
-            # Only add an edge if at least one cable was successfully connected
-            if source_port_list:
-                G.add_edge(
-                    source,
-                    target,
-                    source_ports=source_port_list,
-                    target_ports=target_port_list,
-                    num_cables=len(source_port_list),
+            if lower_ports:
+                graph.add_edge(
+                    lower_node,
+                    upper_node,
+                    source_ports=lower_ports,
+                    target_ports=upper_ports,
+                    num_cables=len(lower_ports),
                     cable_bandwidth_gb=cable_bandwidth_gb,
                 )
 
 
-def calculate_port_stats(G: nx.Graph):
+def calculate_port_stats(graph: nx.Graph) -> None:
     """
     Calculate port utilization statistics for all nodes in the network.
-
-    Computes the equivalent number of ports used based on the bandwidth
-    consumed and the port bandwidth capacity for each node.
-
-    Args:
-        G: The NetworkX graph containing the network topology.
     """
-    for node, data in G.nodes(data=True):
-        # Calculate equivalent ports used based on bandwidth utilization
+    for node, data in graph.nodes(data=True):
         port_bandwidth = data["port_bandwidth_gb"]
         used_bandwidth = data["used_bandwidth_gb"]
 
         if port_bandwidth > 0:
             data["used_ports_equivalent"] = used_bandwidth / port_bandwidth
             logger.debug(
-                f"Node {node}: {used_bandwidth}G bandwidth used "
-                f"({data['used_ports_equivalent']:.1f} ports equivalent)"
+                "Node %s: %sGB/s bandwidth used (%s ports equivalent)",
+                node,
+                used_bandwidth,
+                f"{data['used_ports_equivalent']:.1f}",
             )
         else:
             data["used_ports_equivalent"] = 0
-            logger.warning(f"Node {node} has zero port bandwidth configured")
+            logger.warning("Node %s has zero port bandwidth configured", node)
 
 
-def generate_topology(config: dict) -> nx.Graph:
+def generate_topology(config: Mapping[str, object] | TopologyConfig) -> nx.Graph:
     """
     Generate a network topology based on the provided configuration.
-
-    This function creates a network graph with multiple layers (server, leaf, spine, core)
-    and establishes connections between these layers according to the configuration.
-
-    Args:
-        config: Dictionary containing network configuration parameters.
-
-    Returns:
-        nx.Graph: A NetworkX graph representing the complete network topology.
     """
+    topology_config = ensure_topology_config(config)
     logger.info("Starting network topology generation")
 
-    # Initialize the network graph
-    G = nx.Graph()
+    graph = nx.Graph()
+    layer_nodes: dict[int, list[str]] = {}
 
-    # Add network layers from bottom to top
-    add_network_layer(
-        G,
-        config,
-        "server",
-        None,  # Servers are the bottom layer
-        "leaf",
-    )
+    for layer in topology_config.layers:
+        layer_nodes[layer.index] = add_network_layer(graph, topology_config, layer.index)
 
-    add_network_layer(
-        G,
-        config,
-        "leaf",
-        "server",
-        "spine" if config["num_spine"] > 0 else None,
-    )
-
-    # Add spine layer if specified in config
-    if config["num_spine"] > 0:
-        add_network_layer(
-            G,
-            config,
-            "spine",
-            "leaf",
-            "core" if config["num_core"] > 0 else None,
+    for lower_index in range(len(topology_config.layers) - 1):
+        add_connections(
+            graph,
+            lower_index,
+            lower_index + 1,
+            topology_config,
+            layer_nodes=layer_nodes,
         )
 
-    # Add core layer if specified in config
-    if config["num_core"] > 0:
-        add_network_layer(
-            G,
-            config,
-            "core",
-            "spine",
-            None,  # Core is the top layer
-        )
-
-    # Add connections between layers
-    add_connections(G, "server", "leaf", config)
-    add_connections(G, "leaf", "spine", config)
-    add_connections(G, "spine", "core", config)
-
-    # Calculate port statistics for each node
-    calculate_port_stats(G)
-
+    calculate_port_stats(graph)
     logger.info("Network topology generation completed")
-
-    return G
+    return graph

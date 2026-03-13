@@ -172,3 +172,8 @@ cython_debug/
 
 # Output directory
 output/
+review_runs/
+/network_topology.log
+/port_mapping.xlsx
+/topology.png
+.DS_Store

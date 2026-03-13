@@ -1,86 +1,89 @@
-import os
-import sys
-
-# Add the parent directory to the path so we can import the modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from unittest.mock import patch, MagicMock
+import networkx as nx
 import pandas as pd
+
 from topology_generator.port_mapper import (
+    PORT_MAPPING_COLUMNS,
     create_port_mapping,
-    save_to_csv,
+    extract_port_mapping_rows,
     save_to_excel,
 )
 
 
-@patch("pandas.DataFrame")
-def test_create_port_mapping(mock_dataframe):
-    """Test the create_port_mapping function."""
-    # Create a mock topology
-    G = MagicMock()
+def test_extract_port_mapping_rows_preserves_layer_orientation():
+    graph = nx.Graph()
+    graph.add_node("aggregation_1", layer_index=1)
+    graph.add_node("compute_1", layer_index=0)
+    graph.add_edge(
+        "aggregation_1",
+        "compute_1",
+        source_ports=[3],
+        target_ports=[1],
+        num_cables=1,
+        cable_bandwidth_gb=400,
+    )
 
-    # Mock the edges method to return a list of edges with data
-    G.edges.return_value = [
-        (
-            "server1",
-            "leaf1",
-            {"source_ports": [0], "target_ports": [0], "cable_bandwidth_gb": 10},
-        )
+    rows = extract_port_mapping_rows(graph)
+
+    assert rows == [
+        {
+            "source_serial_number": None,
+            "source_node_id": "compute_1",
+            "source_node_port": 1,
+            "target_node_port": 3,
+            "target_node_id": "aggregation_1",
+            "target_serial_number": None,
+            "cable_number": 1,
+        }
     ]
 
-    # Mock the nodes method to return node data
-    G.nodes.return_value = {"server1": {"type": "server"}, "leaf1": {"type": "leaf"}}
 
-    # Call the function
-    create_port_mapping(G)
+def test_create_port_mapping_returns_expected_dataframe(sample_config):
+    from topology_generator.topology_generator import generate_topology
 
-    # Verify DataFrame was created
-    mock_dataframe.assert_called()
+    df = create_port_mapping(generate_topology(sample_config))
+
+    assert list(df.columns) == PORT_MAPPING_COLUMNS
+    assert len(df) == 9
+    assert df.iloc[0].to_dict() == {
+        "source_serial_number": None,
+        "source_node_id": "compute_1",
+        "source_node_port": 1,
+        "target_node_port": 1,
+        "target_node_id": "aggregation_1",
+        "target_serial_number": None,
+        "cable_number": 1,
+    }
+    assert df.iloc[-1].to_dict() == {
+        "source_serial_number": None,
+        "source_node_id": "fabric_1",
+        "source_node_port": 5,
+        "target_node_port": 1,
+        "target_node_id": "core_1",
+        "target_serial_number": None,
+        "cable_number": 9,
+    }
 
 
-def test_save_to_csv():
-    """Test the save_to_csv function."""
-    # Create a mock port mapping DataFrame
+def test_save_to_excel_writes_file(tmp_path):
     df = pd.DataFrame(
         [
             {
-                "source": "server1",
-                "source_port": 0,
-                "target": "leaf1",
-                "target_port": 0,
-                "bandwidth_gb": 10,
+                "source_serial_number": None,
+                "source_node_id": "node1",
+                "source_node_port": 1,
+                "target_node_port": 1,
+                "target_node_id": "node2",
+                "target_serial_number": None,
+                "cable_number": 1,
             }
-        ]
+        ],
+        columns=PORT_MAPPING_COLUMNS,
     )
 
-    # Mock the to_csv method
-    with patch.object(pd.DataFrame, "to_csv") as mock_to_csv:
-        # Test the function
-        save_to_csv(df, "test_output_dir")
+    save_to_excel(df, str(tmp_path))
 
-        # Check that to_csv was called
-        mock_to_csv.assert_called_once()
-
-
-def test_save_to_excel():
-    """Test the save_to_excel function."""
-    # Create a mock port mapping DataFrame
-    df = pd.DataFrame(
-        [
-            {
-                "source": "server1",
-                "source_port": 0,
-                "target": "leaf1",
-                "target_port": 0,
-                "bandwidth_gb": 10,
-            }
-        ]
-    )
-
-    # Mock the to_excel method
-    with patch.object(pd.DataFrame, "to_excel") as mock_to_excel:
-        # Test the function
-        save_to_excel(df, "test_output_dir")
-
-        # Check that to_excel was called
-        mock_to_excel.assert_called_once()
+    written_file = tmp_path / "port_mapping.xlsx"
+    loaded_df = pd.read_excel(written_file)
+    assert written_file.exists()
+    assert list(loaded_df.columns) == PORT_MAPPING_COLUMNS
+    assert loaded_df.iloc[0]["source_node_id"] == "node1"

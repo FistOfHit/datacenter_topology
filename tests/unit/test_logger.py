@@ -1,29 +1,35 @@
-import os
-import sys
-import shutil
+from argparse import Namespace
 
-# Add the parent directory to the path so we can import the modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from unittest.mock import MagicMock
-from topology_generator.logger import setup_logging
+from topology_generator.logger import LOGGER_NAME, setup_logging
 
 
-def test_setup_logging():
-    """Test the setup_logging function."""
-    # Mock the args
-    args = MagicMock()
-    args.output_dir = "test_output_dir"
+def test_setup_logging_creates_log_file(tmp_path):
+    args = Namespace(output_dir=str(tmp_path / "logs"))
 
-    # Create the directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # Test the function
     logger = setup_logging(args)
+    logger.info("hello topology")
+    for handler in logger.handlers:
+        handler.flush()
 
-    # Check that the logger was created
-    assert logger is not None
+    log_file = tmp_path / "logs" / "network_topology.log"
+    assert logger.name == LOGGER_NAME
+    assert log_file.exists()
+    assert "hello topology" in log_file.read_text(encoding="utf-8")
 
-    # Clean up
-    if os.path.exists(args.output_dir):
-        shutil.rmtree(args.output_dir)
+
+def test_setup_logging_replaces_existing_handlers(tmp_path):
+    args = Namespace(output_dir=str(tmp_path / "logs"))
+
+    first_logger = setup_logging(args)
+    first_logger.info("first run")
+    second_logger = setup_logging(args)
+    second_logger.info("second run")
+    for handler in second_logger.handlers:
+        handler.flush()
+
+    log_contents = (tmp_path / "logs" / "network_topology.log").read_text(
+        encoding="utf-8"
+    )
+    assert first_logger is second_logger
+    assert len(second_logger.handlers) == 2
+    assert "second run" in log_contents

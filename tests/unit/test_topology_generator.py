@@ -1,60 +1,69 @@
-import os
-import sys
-
-# Add the parent directory to the path so we can import the modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from unittest.mock import patch
 import networkx as nx
-from topology_generator.topology_generator import (
-    generate_topology,
-    calculate_port_stats,
-)
+
+from topology_generator.config_schema import TopologyConfig
+from topology_generator.topology_generator import calculate_port_stats, generate_topology
 
 
-@patch("topology_generator.topology_generator.add_network_layer")
-@patch("topology_generator.topology_generator.add_connections")
-@patch("topology_generator.topology_generator.calculate_port_stats")
-def test_generate_topology(
-    mock_calculate_port_stats, mock_add_connections, mock_add_network_layer
-):
-    """Test the generate_topology function with a simple configuration."""
-    config = {
-        "num_server": 4,
-        "num_leaf": 2,
-        "num_spine": 2,
-        "num_core": 1,
-        "server_port_bandwidth_gb": 10,
-        "leaf_port_bandwidth_gb": 40,
-        "spine_port_bandwidth_gb": 100,
-        "core_port_bandwidth_gb": 100,
-        "server_to_leaf_num_cables": 1,
-        "server_to_leaf_cable_bandwidth_gb": 10,
-        "leaf_to_spine_num_cables": 2,
-        "leaf_to_spine_cable_bandwidth_gb": 40,
-        "spine_to_core_num_cables": 2,
-        "spine_to_core_cable_bandwidth_gb": 100,
-    }
+def test_generate_topology_builds_expected_graph(sample_config):
+    graph = generate_topology(sample_config)
 
-    # Mock the return value of add_network_layer
-    mock_graph = nx.Graph()
-    mock_add_network_layer.return_value = mock_graph
+    assert sorted(graph.nodes) == [
+        "aggregation_1",
+        "aggregation_2",
+        "compute_1",
+        "compute_2",
+        "core_1",
+        "fabric_1",
+    ]
+    assert sorted(graph.edges()) == [
+        ("aggregation_1", "fabric_1"),
+        ("aggregation_2", "fabric_1"),
+        ("compute_1", "aggregation_1"),
+        ("compute_1", "aggregation_2"),
+        ("compute_2", "aggregation_1"),
+        ("compute_2", "aggregation_2"),
+        ("fabric_1", "core_1"),
+    ]
 
-    # Call the function
-    generate_topology(config)
+    assert graph.edges["compute_1", "aggregation_1"]["source_ports"] == [1]
+    assert graph.edges["compute_1", "aggregation_1"]["target_ports"] == [1]
+    assert graph.edges["aggregation_1", "fabric_1"]["source_ports"] == [3, 4]
+    assert graph.edges["aggregation_1", "fabric_1"]["target_ports"] == [1, 2]
+    assert graph.edges["fabric_1", "core_1"]["source_ports"] == [5]
+    assert graph.edges["fabric_1", "core_1"]["target_ports"] == [1]
 
-    # Verify the function calls
-    assert mock_add_network_layer.call_count >= 1
-    assert mock_add_connections.call_count >= 1
-    assert mock_calculate_port_stats.call_count == 1
+    assert graph.nodes["compute_1"]["used_bandwidth_gb"] == 20
+    assert graph.nodes["compute_1"]["used_ports_equivalent"] == 2.0
+    assert graph.nodes["aggregation_1"]["used_bandwidth_gb"] == 60
+    assert graph.nodes["aggregation_1"]["used_ports_equivalent"] == 3.0
+    assert graph.nodes["fabric_1"]["used_bandwidth_gb"] == 120
+    assert graph.nodes["fabric_1"]["used_ports_equivalent"] == 3.0
+    assert graph.nodes["core_1"]["used_bandwidth_gb"] == 40
+    assert graph.nodes["core_1"]["used_ports_equivalent"] == 1.0
+
+
+def test_generate_topology_accepts_validated_config(sample_config):
+    config = TopologyConfig.from_mapping(sample_config)
+
+    graph = generate_topology(config)
+
+    assert graph.number_of_nodes() == 6
+    assert graph.number_of_edges() == 7
 
 
 def test_calculate_port_stats():
-    """Test the calculate_port_stats function."""
-    G = nx.Graph()
-    G.add_node("server1", type="server", port_bandwidth_gb=10, used_bandwidth_gb=20)
+    graph = nx.Graph()
+    graph.add_node("node1", layer_index=0, port_bandwidth_gb=10, used_bandwidth_gb=20)
 
-    calculate_port_stats(G)
+    calculate_port_stats(graph)
 
-    # Check that the used_ports_equivalent was calculated correctly
-    assert G.nodes["server1"]["used_ports_equivalent"] == 2.0
+    assert graph.nodes["node1"]["used_ports_equivalent"] == 2.0
+
+
+def test_calculate_port_stats_handles_zero_port_bandwidth():
+    graph = nx.Graph()
+    graph.add_node("node1", layer_index=0, port_bandwidth_gb=0, used_bandwidth_gb=20)
+
+    calculate_port_stats(graph)
+
+    assert graph.nodes["node1"]["used_ports_equivalent"] == 0

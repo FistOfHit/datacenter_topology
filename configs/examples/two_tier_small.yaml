@@ -1,0 +1,21 @@
+layers:
+  - name: compute
+    node_count_in_layer: 32
+    ports_per_node: 8
+    port_bandwidth_gb_per_port: 400
+    uplink_cables_per_node_to_each_node_in_next_layer: 1
+    uplink_cable_bandwidth_gb: 400
+  - name: leaf
+    node_count_in_layer: 8
+    ports_per_node: 128
+    port_bandwidth_gb_per_port: 400
+    downlink_cables_per_node_to_each_node_in_previous_layer: 1
+    downlink_cable_bandwidth_gb: 400
+    uplink_cables_per_node_to_each_node_in_next_layer: 8
+    uplink_cable_bandwidth_gb: 400
+  - name: spine
+    node_count_in_layer: 4
+    ports_per_node: 128
+    port_bandwidth_gb_per_port: 400
+    downlink_cables_per_node_to_each_node_in_previous_layer: 8
+    downlink_cable_bandwidth_gb: 400

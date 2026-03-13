@@ -1,9 +1,11 @@
 from datetime import datetime
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 import logging
 import yaml
+
+from topology_generator.config_schema import TopologyConfig
 
 
 def get_timestamped_dir(base_dir: str) -> str:
@@ -26,15 +28,22 @@ def get_timestamped_dir(base_dir: str) -> str:
     return output_dir
 
 
-def load_config_from_file(config_path: str) -> Dict[str, Any]:
+def ensure_output_dir(output_dir: str) -> Path:
+    """Create the output directory if needed and return it as a path."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    return output_path
+
+
+def load_config_from_file(config_path: str) -> TopologyConfig:
     """
-    Load configuration from a YAML file.
+    Load and validate configuration from a YAML file.
 
     Args:
         config_path: The path to the YAML configuration file.
 
     Returns:
-        The loaded configuration as a dictionary.
+        The validated configuration model.
 
     Raises:
         FileNotFoundError: If the configuration file doesn't exist.
@@ -42,7 +51,8 @@ def load_config_from_file(config_path: str) -> Dict[str, Any]:
     """
     try:
         with open(config_path, "r") as f:
-            return yaml.safe_load(f)
+            raw_config: Any = yaml.safe_load(f)
+            return TopologyConfig.from_mapping(raw_config)
     except FileNotFoundError:
         logging.error(f"Configuration file not found: {config_path}")
         raise
