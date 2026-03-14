@@ -30,14 +30,19 @@ python -m topology_generator.main --config config.yaml --output-dir output
 - `tests/`: behavior-focused unit and integration coverage.
 - `docs/architecture.md`: system-level design notes.
 - `docs/configuration.md`: config field meanings and validation expectations.
+- `configs/examples/multi_fabric_small.yaml`: minimal shared-`gpu_nodes` example.
+- `configs/examples/multi_fabric_backend_frontend.yaml`: larger shared-`gpu_nodes` example with separate backend and frontend fabrics.
 
 ## Project Invariants
 
-- Preserve the output filenames `topology.png`, `port_mapping.xlsx`, and `network_topology.log`.
+- Preserve the output filenames `topology.png`, `port_mapping.xlsx`, and `network_topology.log` for single-fabric runs.
+- Multi-fabric runs intentionally emit `topology_<fabric>.png` files while still preserving `port_mapping.xlsx` and `network_topology.log`.
 - `generate_topology(...)` should keep accepting dict-like config input.
 - Links are modeled only between adjacent layers in the ordered `layers:` list.
 - Current connection semantics intentionally attempt full adjacency between neighboring layers using the configured per-pair cable count.
 - Visualization is condensed for layers with more than two nodes; do not expand the drawing model without a deliberate product decision.
+- Multi-fabric mode shares only `gpu_nodes`, which is always layer `0`.
+- In multi-fabric mode, validation, rendering, and port-mapping logic must remain fabric-isolated even though one giant graph is built internally.
 
 ## Editing Guidance
 

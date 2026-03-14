@@ -1,5 +1,7 @@
 .PHONY: help install install-dev test lint format check
 
+PYTHON ?= python3
+
 help:
 	@printf "Available targets:\n"
 	@printf "  install      Install runtime dependencies in editable mode\n"
@@ -10,18 +12,18 @@ help:
 	@printf "  check        Run lint and tests\n"
 
 install:
-	pip install -e .
+	$(PYTHON) -m pip install -e .
 
 install-dev:
-	pip install -e ".[dev]"
+	$(PYTHON) -m pip install -e ".[dev]"
 
 test:
-	python -m pytest -q
+	$(PYTHON) -m pytest -q
 
 lint:
-	python -m ruff check .
+	$(PYTHON) -m ruff check .
 
 format:
-	python -m ruff format .
+	$(PYTHON) -m ruff format .
 
 check: lint test

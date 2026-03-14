@@ -14,7 +14,7 @@ def test_parse_args_defaults():
             "topology_generator.argparser.get_timestamped_dir", return_value="output"
         ):
             args = parse_args()
-            assert args.config == "config.yaml"
+            assert args.config == "configs/examples/two_tier_small.yaml"
             assert args.output_dir == "output"
 
 

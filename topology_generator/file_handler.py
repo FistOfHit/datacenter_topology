@@ -1,11 +1,14 @@
-from datetime import datetime
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-import logging
+
 import yaml
 
 from topology_generator.config_schema import TopologyConfig
+
+logger = logging.getLogger(__name__)
 
 
 def get_timestamped_dir(base_dir: str) -> str:
@@ -50,12 +53,12 @@ def load_config_from_file(config_path: str) -> TopologyConfig:
         yaml.YAMLError: If the YAML file has invalid syntax.
     """
     try:
-        with open(config_path, "r") as f:
+        with Path(config_path).open("r", encoding="utf-8") as f:
             raw_config: Any = yaml.safe_load(f)
             return TopologyConfig.from_mapping(raw_config)
     except FileNotFoundError:
-        logging.error(f"Configuration file not found: {config_path}")
+        logger.error("Configuration file not found: %s", config_path)
         raise
     except yaml.YAMLError as e:
-        logging.error(f"Invalid YAML in configuration file: {str(e)}")
+        logger.error("Invalid YAML in configuration file: %s", str(e))
         raise

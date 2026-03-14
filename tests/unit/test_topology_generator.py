@@ -1,45 +1,49 @@
-import networkx as nx
-
 from topology_generator.config_schema import TopologyConfig
-from topology_generator.topology_generator import calculate_port_stats, generate_topology
+from topology_generator.topology_generator import (
+    build_fabric_output_name,
+    generate_topology,
+    get_fabric_view,
+    is_multi_fabric_graph,
+)
 
 
-def test_generate_topology_builds_expected_graph(sample_config):
+def test_generate_topology_builds_expected_grouped_graph(sample_config):
     graph = generate_topology(sample_config)
 
     assert sorted(graph.nodes) == [
-        "aggregation_1",
-        "aggregation_2",
-        "compute_1",
-        "compute_2",
-        "core_1",
-        "fabric_1",
+        "pod_1_compute_1",
+        "pod_1_compute_2",
+        "pod_1_leaf_1",
+        "pod_2_compute_1",
+        "pod_2_compute_2",
+        "pod_2_leaf_1",
+        "spine_1",
+        "spine_2",
     ]
     assert sorted(graph.edges()) == [
-        ("aggregation_1", "fabric_1"),
-        ("aggregation_2", "fabric_1"),
-        ("compute_1", "aggregation_1"),
-        ("compute_1", "aggregation_2"),
-        ("compute_2", "aggregation_1"),
-        ("compute_2", "aggregation_2"),
-        ("fabric_1", "core_1"),
+        ("pod_1_compute_1", "pod_1_leaf_1"),
+        ("pod_1_compute_2", "pod_1_leaf_1"),
+        ("pod_1_leaf_1", "spine_1"),
+        ("pod_1_leaf_1", "spine_2"),
+        ("pod_2_compute_1", "pod_2_leaf_1"),
+        ("pod_2_compute_2", "pod_2_leaf_1"),
+        ("pod_2_leaf_1", "spine_1"),
+        ("pod_2_leaf_1", "spine_2"),
     ]
 
-    assert graph.edges["compute_1", "aggregation_1"]["source_ports"] == [1]
-    assert graph.edges["compute_1", "aggregation_1"]["target_ports"] == [1]
-    assert graph.edges["aggregation_1", "fabric_1"]["source_ports"] == [3, 4]
-    assert graph.edges["aggregation_1", "fabric_1"]["target_ports"] == [1, 2]
-    assert graph.edges["fabric_1", "core_1"]["source_ports"] == [5]
-    assert graph.edges["fabric_1", "core_1"]["target_ports"] == [1]
+    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["source_ports"] == [1]
+    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["target_ports"] == [1]
+    assert graph.edges["pod_1_leaf_1", "spine_1"]["source_ports"] == [3]
+    assert graph.edges["pod_1_leaf_1", "spine_1"]["target_ports"] == [1]
+    assert graph.edges["pod_2_leaf_1", "spine_2"]["source_ports"] == [4]
+    assert graph.edges["pod_2_leaf_1", "spine_2"]["target_ports"] == [2]
 
-    assert graph.nodes["compute_1"]["used_bandwidth_gb"] == 20
-    assert graph.nodes["compute_1"]["used_ports_equivalent"] == 2.0
-    assert graph.nodes["aggregation_1"]["used_bandwidth_gb"] == 60
-    assert graph.nodes["aggregation_1"]["used_ports_equivalent"] == 3.0
-    assert graph.nodes["fabric_1"]["used_bandwidth_gb"] == 120
-    assert graph.nodes["fabric_1"]["used_ports_equivalent"] == 3.0
-    assert graph.nodes["core_1"]["used_bandwidth_gb"] == 40
-    assert graph.nodes["core_1"]["used_ports_equivalent"] == 1.0
+    assert graph.nodes["pod_1_compute_1"]["used_bandwidth_gb"] == 100
+    assert graph.nodes["pod_1_compute_1"]["used_lane_units"] == 1
+    assert graph.nodes["pod_1_leaf_1"]["used_bandwidth_gb"] == 400
+    assert graph.nodes["pod_1_leaf_1"]["used_lane_units"] == 4
+    assert graph.nodes["spine_1"]["used_bandwidth_gb"] == 200
+    assert graph.nodes["spine_1"]["used_lane_units"] == 2
 
 
 def test_generate_topology_accepts_validated_config(sample_config):
@@ -47,23 +51,75 @@ def test_generate_topology_accepts_validated_config(sample_config):
 
     graph = generate_topology(config)
 
-    assert graph.number_of_nodes() == 6
-    assert graph.number_of_edges() == 7
+    assert graph.number_of_nodes() == 8
+    assert graph.number_of_edges() == 8
 
 
-def test_calculate_port_stats():
-    graph = nx.Graph()
-    graph.add_node("node1", layer_index=0, port_bandwidth_gb=10, used_bandwidth_gb=20)
+def test_generate_topology_supports_global_only_links(sample_global_config):
+    graph = generate_topology(sample_global_config)
 
-    calculate_port_stats(graph)
-
-    assert graph.nodes["node1"]["used_ports_equivalent"] == 2.0
+    assert sorted(graph.nodes) == ["core_1", "spine_1", "spine_2"]
+    assert sorted(graph.edges()) == [("spine_1", "core_1"), ("spine_2", "core_1")]
 
 
-def test_calculate_port_stats_handles_zero_port_bandwidth():
-    graph = nx.Graph()
-    graph.add_node("node1", layer_index=0, port_bandwidth_gb=0, used_bandwidth_gb=20)
+def test_generate_topology_allocates_contiguous_lane_units_for_mixed_speed_links(
+    mixed_speed_config,
+):
+    graph = generate_topology(mixed_speed_config)
 
-    calculate_port_stats(graph)
+    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["source_ports"] == [3]
+    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["target_ports"] == [1]
+    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["source_lane_units_per_cable"] == 2
+    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["target_lane_units_per_cable"] == 2
+    assert graph.nodes["pod_1_leaf_switch_1"]["supported_port_bandwidths_gb"] == (
+        400.0,
+        800.0,
+    )
 
-    assert graph.nodes["node1"]["used_ports_equivalent"] == 0
+
+def test_generate_topology_merges_gpu_nodes_across_fabrics(multi_fabric_config):
+    graph = generate_topology(multi_fabric_config)
+
+    assert is_multi_fabric_graph(graph) is True
+    assert graph.nodes["gpu_nodes_1"]["is_shared_gpu_node"] is True
+    assert set(graph.nodes["gpu_nodes_1"]["fabric_metrics"]) == {
+        "backend",
+        "frontend",
+        "oob",
+    }
+    assert "backend__pod_1_leaf_1" in graph.nodes
+    assert "frontend__pod_1_tor_1" in graph.nodes
+    assert "oob__mgmt_1" in graph.nodes
+
+
+def test_get_fabric_view_flattens_shared_gpu_node_metrics(multi_fabric_config):
+    graph = generate_topology(multi_fabric_config)
+
+    backend_view = get_fabric_view(graph, "backend")
+
+    assert backend_view.nodes["gpu_nodes_1"]["used_lane_units"] == 1
+    assert backend_view.nodes["gpu_nodes_1"]["total_lane_units"] == 1
+    assert backend_view.nodes["gpu_nodes_1"]["group_label"] == "pod_1"
+    assert {frozenset(edge) for edge in backend_view.edges()} == {
+        frozenset(("backend__pod_1_leaf_1", "backend__spine_1")),
+        frozenset(("gpu_nodes_1", "backend__pod_1_leaf_1")),
+        frozenset(("gpu_nodes_2", "backend__pod_1_leaf_1")),
+    }
+
+
+def test_get_fabric_view_rejects_unknown_fabric(multi_fabric_config):
+    graph = generate_topology(multi_fabric_config)
+
+    try:
+        get_fabric_view(graph, "typo")
+    except KeyError as exc:
+        error = exc
+    else:
+        error = None
+
+    assert error is not None
+    assert "Unknown fabric" in str(error)
+
+
+def test_build_fabric_output_name_normalizes_for_filesystem():
+    assert build_fabric_output_name("front/end") == "front_end"

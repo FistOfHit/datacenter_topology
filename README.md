@@ -1,31 +1,21 @@
 # Datacenter Topology Generator
 
-Generate datacenter network topologies from YAML, visualize them as a condensed diagram, and export a per-cable Excel cut-sheet.
+Generate grouped datacenter network topologies from YAML, render condensed topology diagrams, and export a per-cable Excel cut-sheet.
 
-## What This Repo Does
-
-The tool builds a layered `networkx` model from an ordered list of generic layers. Layer order defines topology semantics:
-
-- layer `0` is the bottom of the fabric
-- layer `N-1` is the top of the fabric
-- links are only modeled between adjacent layers
-
-From that model it produces:
+Single-fabric runs produce:
 
 - `topology.png`
 - `port_mapping.xlsx`
 - `network_topology.log`
 
-The CLI contract is unchanged:
+Multi-fabric runs still produce one `port_mapping.xlsx` and one `network_topology.log`, but emit one diagram per fabric such as `topology_backend.png`.
+
+The CLI entrypoints are:
 
 ```bash
-python -m topology_generator.main --config <config.yaml> --output-dir <output_dir> [--timestamp]
-```
-
-Installed console entry point:
-
-```bash
-topology-generator --config <config.yaml> --output-dir <output_dir> [--timestamp]
+python -m topology_generator.main --config <config_path> --output-dir <output_dir>
+python -m topology_generator --config <config_path> --output-dir <output_dir>
+topology-generator --config <config_path> --output-dir <output_dir>
 ```
 
 ## Quick Start
@@ -52,102 +42,160 @@ pre-commit install
 ### Run
 
 ```bash
-python -m topology_generator.main --config config.yaml --output-dir output
+python -m topology_generator.main --config configs/examples/two_tier_small.yaml --output-dir output
 ```
 
-Timestamped output directory:
+Add `--timestamp` to create a timestamped output directory:
 
 ```bash
-python -m topology_generator.main --config config.yaml --output-dir output --timestamp
+python -m topology_generator.main --config configs/examples/two_tier_small.yaml --output-dir output --timestamp
 ```
 
 ## Configuration
 
-The input is a YAML mapping with a single ordered `layers:` list. Each layer defines its own node count, shared port capacity, and connectivity to the adjacent layers above and below it.
+The YAML stays intentionally simple.
+
+Single-fabric mode uses:
+
+- `groups`: optional repeated scopes such as `pod`
+- `layers`: ordered tiers and per-node port capacity
+- `links`: explicit connectivity between adjacent layers
 
 Example:
 
 ```yaml
+groups:
+  - name: pod
+    count: 2
+
 layers:
-  - name: gpu_server
-    node_count_in_layer: 16
-    ports_per_node: 4
-    port_bandwidth_gb_per_port: 400
-    uplink_cables_per_node_to_each_node_in_next_layer: 1
-    uplink_cable_bandwidth_gb: 400
+  - name: compute
+    placement: pod
+    nodes_per_group: 32
+    port_layout:
+      base_lane_bandwidth_gb: 400
+      total_lane_units: 8
+      supported_port_modes:
+        - port_bandwidth_gb: 400
+          lane_units: 1
 
-  - name: leaf_sw
-    node_count_in_layer: 4
-    ports_per_node: 18
-    port_bandwidth_gb_per_port: 800
-    downlink_cables_per_node_to_each_node_in_previous_layer: 1
-    downlink_cable_bandwidth_gb: 400
-    uplink_cables_per_node_to_each_node_in_next_layer: 1
-    uplink_cable_bandwidth_gb: 800
+  - name: leaf
+    placement: pod
+    nodes_per_group: 8
+    port_layout:
+      base_lane_bandwidth_gb: 400
+      total_lane_units: 128
+      supported_port_modes:
+        - port_bandwidth_gb: 400
+          lane_units: 1
+        - port_bandwidth_gb: 800
+          lane_units: 2
 
-  - name: spine_sw
-    node_count_in_layer: 2
-    ports_per_node: 6
-    port_bandwidth_gb_per_port: 800
-    downlink_cables_per_node_to_each_node_in_previous_layer: 1
-    downlink_cable_bandwidth_gb: 800
-    uplink_cables_per_node_to_each_node_in_next_layer: 2
-    uplink_cable_bandwidth_gb: 800
-
-  - name: core_sw
-    node_count_in_layer: 1
-    ports_per_node: 4
-    port_bandwidth_gb_per_port: 800
-    downlink_cables_per_node_to_each_node_in_previous_layer: 2
-    downlink_cable_bandwidth_gb: 800
+links:
+  - from: compute
+    to: leaf
+    policy: within_group_full_mesh
+    cables_per_pair: 1
+    cable_bandwidth_gb: 400
 ```
 
-More detail:
+For the full config reference, validation rules, and examples:
 
 - [Configuration Reference](docs/configuration.md)
 - [Worked Examples](docs/examples.md)
 
-## How It Works
+Multi-fabric mode shares a single `gpu_nodes` layer across several isolated fabrics.
+Shared endpoint partitions live in one top-level `groupings` section, and each
+fabric selects which grouping it operates in:
 
-1. Parse CLI arguments.
-2. Create the output directory and configure logging.
-3. Load YAML into a validated `TopologyConfig`.
-4. Build a `networkx.Graph` across the ordered layers.
-5. Connect each layer densely to the next layer using the configured per-pair cable count.
-6. Render the condensed topology diagram.
-7. Flatten graph edges into per-cable Excel rows.
+```yaml
+groupings:
+  - name: pod
+    members_per_group: 2
+  - name: rack
+    members_per_group: 1
 
-Design details:
+gpu_nodes:
+  total_nodes: 2
+  fabric_port_layouts:
+    backend:
+      base_lane_bandwidth_gb: 100
+      total_lane_units: 1
+      supported_port_modes:
+        - port_bandwidth_gb: 100
+          lane_units: 1
+    frontend:
+      base_lane_bandwidth_gb: 50
+      total_lane_units: 1
+      supported_port_modes:
+        - port_bandwidth_gb: 50
+          lane_units: 1
 
-- [Architecture Overview](docs/architecture.md)
-- [Agent Guide](AGENTS.md)
+fabrics:
+  - name: backend
+    grouping: pod
+    layers:
+      - name: leaf
+        placement: group
+        nodes_per_group: 1
+        port_layout: ...
+    links:
+      - from: gpu_nodes
+        to: leaf
+        policy: within_group_full_mesh
+        cables_per_pair: 1
+        cable_bandwidth_gb: 100
+
+  - name: frontend
+    grouping: pod
+    layers:
+      - name: tor
+        placement: group
+        nodes_per_group: 1
+        port_layout: ...
+    links:
+      - from: gpu_nodes
+        to: tor
+        policy: within_group_full_mesh
+        cables_per_pair: 1
+        cable_bandwidth_gb: 50
+
+  - name: oob
+    grouping: rack
+    layers:
+      - name: mgmt
+        placement: global
+        nodes_per_group: 1
+        port_layout: ...
+    links:
+      - from: gpu_nodes
+        to: mgmt
+        policy: group_to_global_full_mesh
+        cables_per_pair: 1
+        cable_bandwidth_gb: 25
+```
+
+See [`configs/examples/multi_fabric_small.yaml`](configs/examples/multi_fabric_small.yaml) for a minimal complete example with `backend`, `frontend`, and `oob`.
+See [`configs/examples/multi_fabric_backend_frontend.yaml`](configs/examples/multi_fabric_backend_frontend.yaml) for a larger two-fabric example built from the sixteen-pod three-tier backend plus a separate frontend fabric.
+See [`configs/examples/multi_fabric_backend_frontend_oob.yaml`](configs/examples/multi_fabric_backend_frontend_oob.yaml) for the same large shared endpoint population plus a third `OOB` fabric that uses `rack = 8` grouping and 1G management links.
 
 ## Development
 
 Helpful commands:
 
 ```bash
-make lint
-make test
-make check
-make format
+./.venv/bin/python -m pytest -q
+./.venv/bin/python -m ruff check .
+./.venv/bin/python -m mypy
+python -m topology_generator.main --config configs/examples/three_tier_small.yaml --output-dir output/example
 ```
 
-The repository includes:
+Developer-oriented detail lives in:
 
-- `Ruff` for linting and formatting
-- `pytest` for behavior-first testing
-- `mypy` configuration for static analysis
-- `pre-commit` hooks for local quality gates
-- GitHub Actions for lint and test CI
-
-## Notes and Constraints
-
-- The schema is generic and position-based; layer names are optional labels only.
-- Links are modeled only between adjacent layers in the ordered list.
-- The connection strategy is intentionally dense: every node in layer `i` attempts the configured number of links to every node in layer `i+1`.
-- Visualization is intentionally condensed for larger layers; it is a planning view, not a full physical layout renderer.
-- Generated outputs under `output/` and `review_runs/` are disposable.
+- [Architecture Overview](docs/architecture.md)
+- [Configuration Reference](docs/configuration.md)
+- [Worked Examples](docs/examples.md)
+- [Agent Guide](AGENTS.md)
 
 ## License
 

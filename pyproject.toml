@@ -89,3 +89,8 @@ pretty = true
 show_error_codes = true
 warn_redundant_casts = true
 warn_unused_ignores = true
+disable_error_code = ["import-untyped"]
+
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*", "networkx", "networkx.*", "pandas", "pandas.*"]
+ignore_missing_imports = true

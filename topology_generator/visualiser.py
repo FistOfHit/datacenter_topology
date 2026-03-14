@@ -1,13 +1,21 @@
-import os
+from __future__ import annotations
+
 import importlib
 import logging
 import math
-import re
+import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
+from topology_generator.topology_generator import (
+    build_fabric_output_name,
+    get_fabric_names,
+    get_fabric_view,
+    is_multi_fabric_graph,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,36 +65,12 @@ Patch = patches.Patch
 Rectangle = patches.Rectangle
 
 
-# Node box text layout.
-MAX_NODE_NAME_CHARS = 10
+MAX_NODE_NAME_CHARS = 12
 NODE_NAME_FONT_SIZE = 8
-NODE_METADATA_FONT_SIZE = 7
-PORT_USAGE_VALUE_FONT_SIZE = 7
-PORT_USAGE_LABEL_FONT_SIZE = 4.5
-PORT_USAGE_VALUE_Y_OFFSET = -0.09
-PORT_USAGE_LABEL_Y_OFFSET = -0.145
-
-# Per-node aggregate bandwidth indicator placement.
-AGGREGATE_BW_X_OFFSET = -0.95
-
-# Fanout arc geometry around visible link bundles.
-FANOUT_UP_ARC_MARGIN_DEGREES = 5
-FANOUT_DOWN_ARC_MARGIN_DEGREES = 10
-FANOUT_ARC_WIDTH = 1.0
-FANOUT_ARC_HEIGHT = 0.34
-FANOUT_ARC_RADIUS_PADDING = 0.12
-FANOUT_NARROW_ARC_SPAN_THRESHOLD_DEGREES = 40
-FANOUT_NARROW_ARC_EXTRA_PADDING = 0.1
+NODE_METADATA_FONT_SIZE = 6.5
+PORT_USAGE_VALUE_FONT_SIZE = 6.5
+PORT_USAGE_LABEL_FONT_SIZE = 5
 FANOUT_LABEL_FONT_SIZE = 8
-
-# Condensed-layer placement when only first/last nodes are shown.
-CONDENSED_LEFT_X = -2.0
-CONDENSED_RIGHT_X = 2.0
-CONDENSED_CENTER_X = 0.0
-CONDENSED_PLACEHOLDER_WIDTH = 1.4
-CONDENSED_PLACEHOLDER_HEIGHT = 0.22
-CONDENSED_COUNT_DIGITS = 4
-
 LAYER_COLOR_PALETTE = [
     "#add8e6",
     "#90ee90",
@@ -104,26 +88,141 @@ LINK_COLOR_PALETTE = [
 ]
 
 
+@dataclass(frozen=True)
+class NodeBoxGeometry:
+    width: float
+    height: float
+    name_y_offset: float
+    ordinal_y_offset: float
+    ports_value_y_offset: float
+    ports_label_y_offset: float
+    aggregate_x_offset: float
+    aggregate_text_offset: float
+    aggregate_arrow_size: float
+    aggregate_left_extent: float
+    fanout_arc_width: float
+    fanout_arc_height: float
+    fanout_radius_padding: float
+    fanout_narrow_extra_padding: float
+    fanout_narrow_span_threshold_deg: float
+    fanout_up_margin_deg: float
+    fanout_down_margin_deg: float
+
+    @property
+    def half_height(self) -> float:
+        return self.height / 2
+
+
+@dataclass(frozen=True)
+class LayoutProfile:
+    node_box: NodeBoxGeometry
+    layer_spacing: float
+    grouped_node_offset: float
+    global_node_offset: float
+    group_side_padding: float
+    group_vertical_padding: float
+    two_group_inner_gap: float
+    hidden_group_lane_width: float
+    right_annotation_gap: float
+    right_annotation_extent: float
+    plot_padding_x: float
+    plot_padding_y: float
+    figure_width: float
+    figure_height_min: float
+    figure_height_max: float
+    save_padding_inches: float
+    placeholder_text_height: float
+    placeholder_text_char_width: float
+
+    def grouped_half_span(self) -> float:
+        return (
+            self.grouped_node_offset
+            + (self.node_box.width / 2)
+            + self.group_side_padding
+            + self.node_box.aggregate_left_extent
+        )
+
+
+@dataclass(frozen=True)
+class LayoutResult:
+    positions: dict[str, tuple[float, float]]
+    visible_nodes: set[str]
+    group_bounds: list[tuple[float, float, float, float, str]]
+    placeholder_labels: list[tuple[float, float, str]]
+    profile: LayoutProfile
+    layer_bandwidth_x: float
+    layer_heights: dict[int, float]
+
+
+def compute_node_box_geometry() -> NodeBoxGeometry:
+    return NodeBoxGeometry(
+        width=2.05,
+        height=1.34,
+        name_y_offset=0.42,
+        ordinal_y_offset=0.16,
+        ports_value_y_offset=-0.20,
+        ports_label_y_offset=-0.45,
+        aggregate_x_offset=-2.95,
+        aggregate_text_offset=0.18,
+        aggregate_arrow_size=0.18,
+        aggregate_left_extent=3.95,
+        fanout_arc_width=2.75,
+        fanout_arc_height=1.12,
+        fanout_radius_padding=0.26,
+        fanout_narrow_extra_padding=0.16,
+        fanout_narrow_span_threshold_deg=40.0,
+        fanout_up_margin_deg=12.0,
+        fanout_down_margin_deg=18.0,
+    )
+
+
+def build_layout_profile(total_group_count: int) -> LayoutProfile:
+    _ = total_group_count
+    return LayoutProfile(
+        node_box=compute_node_box_geometry(),
+        layer_spacing=4.0,
+        grouped_node_offset=3.45,
+        global_node_offset=2.45,
+        group_side_padding=1.45,
+        group_vertical_padding=1.18,
+        two_group_inner_gap=2.7,
+        hidden_group_lane_width=5.1,
+        right_annotation_gap=0.55,
+        right_annotation_extent=2.7,
+        plot_padding_x=0.46,
+        plot_padding_y=0.68,
+        figure_width=18.0,
+        figure_height_min=10.5,
+        figure_height_max=15.5,
+        save_padding_inches=0.14,
+        placeholder_text_height=0.24,
+        placeholder_text_char_width=0.08,
+    )
+
+
 def format_node_name(name: str, max_chars: int = MAX_NODE_NAME_CHARS) -> str:
-    """Limit displayed node names so they fit within the node box."""
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower())
-    normalized = re.sub(r"_+", "_", normalized).strip("_")
-    return normalized[:max_chars]
-
-
-def split_node_label(node: str) -> tuple[str, str]:
-    """Split a generated node label into display name and numeric suffix."""
-    name, node_id = node.rsplit("_", 1)
-    return format_node_name(name), node_id
+    display_name = name.strip()
+    if len(display_name) <= max_chars:
+        return display_name
+    if max_chars <= 3:
+        return display_name[:max_chars]
+    return f"{display_name[: max_chars - 3].rstrip()}..."
 
 
 def format_hidden_node_label(hidden_count: int) -> str:
-    """Build a fixed-width condensed-layer label for hidden nodes."""
-    return f"...({hidden_count:>{CONDENSED_COUNT_DIGITS}} more)..."
+    _ = hidden_count
+    return "..."
+
+
+def format_hidden_group_label(hidden_count: int) -> str:
+    return format_hidden_node_label(hidden_count)
+
+
+def format_group_label(group_name: str, group_index: int) -> str:
+    return f"{group_name}_{group_index}"
 
 
 def format_bandwidth(bandwidth_gb: float) -> str:
-    """Format bandwidth as a data rate in GB/s or TB/s as appropriate."""
     if float(bandwidth_gb).is_integer():
         bandwidth_gb = int(bandwidth_gb)
 
@@ -135,29 +234,93 @@ def format_bandwidth(bandwidth_gb: float) -> str:
     return f"{bandwidth_gb} GB/s"
 
 
-def format_fanout_label(num_cables: int, bandwidth_gb: float) -> str:
-    """Format a fanout annotation label."""
-    return f"{num_cables} x {format_bandwidth(bandwidth_gb)}"
+def format_fanout_label(num_cables: int, total_bandwidth_gb: float) -> str:
+    _ = total_bandwidth_gb
+    return f"{num_cables} cables"
 
 
-def get_layer_height(layer_index: int) -> float:
-    """Return the y-position for a layer index."""
-    return float(layer_index)
+def get_layer_height(layer_index: int, layer_spacing: float = 1.0) -> float:
+    return float(layer_index) * layer_spacing
 
 
 def get_layer_color(layer_index: int) -> str:
-    """Return a stable color for a layer index."""
     return LAYER_COLOR_PALETTE[layer_index % len(LAYER_COLOR_PALETTE)]
 
 
+def get_sorted_node_items(graph: nx.Graph) -> list[tuple[str, dict[str, Any]]]:
+    return sorted(graph.nodes(data=True), key=_node_sort_key)
+
+
+def select_visible_group_indices(group_indices: list[int]) -> list[int]:
+    if len(group_indices) <= 2:
+        return group_indices
+    return [group_indices[0], group_indices[-1]]
+
+
+def get_group_centers(
+    visible_group_indices: list[int],
+    profile: LayoutProfile,
+    total_group_count: int,
+) -> dict[int, float]:
+    if not visible_group_indices:
+        return {}
+    if len(visible_group_indices) == 1:
+        return {visible_group_indices[0]: 0.0}
+
+    if total_group_count <= 2:
+        center_distance = (2 * profile.grouped_half_span()) + profile.two_group_inner_gap
+    else:
+        center_distance = (
+            (2 * profile.grouped_node_offset)
+            + (2 * profile.node_box.width)
+            + profile.hidden_group_lane_width
+        )
+
+    return {
+        visible_group_indices[0]: -(center_distance / 2),
+        visible_group_indices[-1]: center_distance / 2,
+    }
+
+
+def compute_group_lane_layout(
+    total_group_count: int,
+    visible_group_indices: list[int],
+    profile: LayoutProfile,
+) -> tuple[dict[int, float], float | None]:
+    group_centers = get_group_centers(visible_group_indices, profile, total_group_count)
+    hidden_placeholder_x = 0.0 if total_group_count > len(visible_group_indices) else None
+    return group_centers, hidden_placeholder_x
+
+
+def get_bandwidth_colors(graph: nx.Graph) -> dict[float, str]:
+    unique_bandwidths = sorted(
+        {
+            data.get("cable_bandwidth_gb")
+            for _, _, data in graph.edges(data=True)
+            if data.get("cable_bandwidth_gb") is not None
+        }
+    )
+
+    bandwidth_colors = {bandwidth: "black" for bandwidth in unique_bandwidths}
+    if len(unique_bandwidths) > 1:
+        bandwidth_colors = {
+            bandwidth: (
+                "black"
+                if index == 0
+                else LINK_COLOR_PALETTE[(index - 1) % len(LINK_COLOR_PALETTE)]
+            )
+            for index, bandwidth in enumerate(unique_bandwidths)
+        }
+    return bandwidth_colors
+
+
 def draw_arrow_symbol(
-    ax: plt.Axes,
+    ax: Any,
     arrow_size: float,
     base_x: float,
     base_y: float,
     direction: str = "up",
 ) -> None:
-    """Draw an arrow symbol at the specified base coordinates."""
     multiplier = 1 if direction == "up" else -1
     ax.arrow(
         base_x,
@@ -165,26 +328,24 @@ def draw_arrow_symbol(
         0,
         arrow_size * multiplier,
         head_width=arrow_size * 0.8,
-        head_length=arrow_size * 0.4,
+        head_length=arrow_size * 0.45,
         fc="black",
         ec="black",
         length_includes_head=True,
+        zorder=3,
     )
 
 
 def add_bandwidth_indicators(
-    ax: plt.Axes,
+    ax: Any,
     pos: dict[str, tuple[float, float]],
     node: str,
     node_data: dict[str, Any],
-    node_half_height: float = 0.15,
+    geometry: NodeBoxGeometry,
 ) -> None:
-    """Add bandwidth arrows and values to a node."""
     x, y = pos[node]
-    symbol_x = x + AGGREGATE_BW_X_OFFSET
-    arrow_size = 0.04
-    text_offset = 0.08
-    adjustment = node_half_height - 0.05
+    symbol_x = x + geometry.aggregate_x_offset
+    adjustment = geometry.half_height - 0.08
 
     for direction, multiplier in {"up": 1, "down": -1}.items():
         aggregate_bandwidth = node_data.get(f"aggregate_bandwidth_{direction}", 0)
@@ -194,50 +355,53 @@ def add_bandwidth_indicators(
         symbol_y = y + adjustment * multiplier
         draw_arrow_symbol(
             ax,
-            arrow_size,
+            geometry.aggregate_arrow_size,
             symbol_x,
-            symbol_y - (arrow_size / 2) * multiplier,
+            symbol_y - (geometry.aggregate_arrow_size / 2) * multiplier,
             direction,
         )
         plt.text(
-            symbol_x + text_offset,
+            symbol_x - geometry.aggregate_text_offset,
             symbol_y,
             format_bandwidth(aggregate_bandwidth),
-            ha="left",
+            ha="right",
             va="center",
             fontsize=8,
+            zorder=3,
         )
 
 
 def add_layer_bandwidth_arrow(
-    ax: plt.Axes,
+    ax: Any,
     y1: float,
     y2: float,
     bandwidth_gb: float,
-    x_pos: float = 2.7,
+    x_pos: float,
 ) -> None:
-    """Add a double-ended arrow showing total inter-layer bandwidth."""
+    label_offset_x = 0.22
     arrow_properties = dict(
         head_width=0.1,
         head_length=0.1,
         fc="black",
         ec="black",
         length_includes_head=True,
+        zorder=2,
     )
 
     midpoint_y = (y1 + y2) / 2
-    arrow_length = (y2 - y1) / 4
+    arrow_length = 0.68
     ax.arrow(x_pos, midpoint_y, 0, arrow_length, **arrow_properties)
     ax.arrow(x_pos, midpoint_y, 0, -arrow_length, **arrow_properties)
     plt.text(
-        x_pos + 0.15,
+        x_pos + label_offset_x,
         midpoint_y,
         format_bandwidth(bandwidth_gb),
         ha="left",
         va="center",
         fontsize=8,
         color="black",
-        bbox=dict(facecolor="white", edgecolor="none", alpha=0.8),
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.85),
+        zorder=3,
     )
 
 
@@ -246,7 +410,6 @@ def calculate_layer_bandwidth(
     lower_layer_nodes: list[str],
     upper_layer_nodes: list[str],
 ) -> float:
-    """Calculate total bandwidth between two adjacent rendered layers."""
     total_bandwidth = 0.0
     lower_set = set(lower_layer_nodes)
     upper_set = set(upper_layer_nodes)
@@ -264,7 +427,6 @@ def calculate_layer_bandwidth(
 
 
 def _normalize_fanout_angle(angle: float, direction: str) -> float:
-    """Normalize an edge angle into the relevant upper or lower hemisphere."""
     if direction == "up":
         return max(5.0, min(175.0, angle))
 
@@ -279,16 +441,15 @@ def get_fanout_annotation(
     visible_nodes: set[str],
     node: str,
     direction: str,
-    node_half_height: float = 0.15,
+    geometry: NodeBoxGeometry,
 ) -> dict[str, Any] | None:
-    """Build the geometry and label data for a node's fanout annotation."""
     x, y = pos[node]
     y_multiplier = 1 if direction == "up" else -1
-    anchor_y = y + (node_half_height * y_multiplier)
+    anchor_y = y + (geometry.half_height * y_multiplier)
     node_layer_index = graph.nodes[node]["layer_index"]
 
     total_cables = 0
-    bandwidths: set[float] = set()
+    total_bandwidth_gb = 0.0
     visible_angles: list[float] = []
 
     for neighbor in graph.neighbors(node):
@@ -304,43 +465,44 @@ def get_fanout_annotation(
             continue
 
         total_cables += num_cables
-        bandwidths.add(float(edge_data.get("cable_bandwidth_gb", 0)))
+        total_bandwidth_gb += num_cables * float(edge_data.get("cable_bandwidth_gb", 0))
 
         if neighbor not in visible_nodes:
             continue
 
         neighbor_x, raw_neighbor_y = pos[neighbor]
-        neighbor_anchor_y = raw_neighbor_y - (node_half_height * y_multiplier)
+        neighbor_anchor_y = raw_neighbor_y - (geometry.half_height * y_multiplier)
         angle = math.degrees(math.atan2(neighbor_anchor_y - anchor_y, neighbor_x - x))
         visible_angles.append(_normalize_fanout_angle(angle, direction))
 
-    if total_cables <= 0 or len(visible_angles) < 2 or len(bandwidths) != 1:
+    if total_cables <= 0 or total_bandwidth_gb <= 0 or len(visible_angles) < 2:
         return None
 
     if direction == "up":
-        theta1 = min(visible_angles) - FANOUT_UP_ARC_MARGIN_DEGREES
-        theta2 = max(visible_angles) + FANOUT_UP_ARC_MARGIN_DEGREES
+        theta1 = min(visible_angles) - 6.0
+        theta2 = max(visible_angles) + 6.0
     else:
-        theta1 = min(visible_angles) - FANOUT_DOWN_ARC_MARGIN_DEGREES
-        theta2 = max(visible_angles) + FANOUT_DOWN_ARC_MARGIN_DEGREES
+        theta1 = min(visible_angles) - 8.0
+        theta2 = max(visible_angles) + 8.0
 
-    label_padding = FANOUT_ARC_RADIUS_PADDING
-    if (theta2 - theta1) <= FANOUT_NARROW_ARC_SPAN_THRESHOLD_DEGREES:
-        label_padding += FANOUT_NARROW_ARC_EXTRA_PADDING
+    label_padding = geometry.fanout_radius_padding + 0.28
+    if (theta2 - theta1) <= geometry.fanout_narrow_span_threshold_deg:
+        label_padding += geometry.fanout_narrow_extra_padding
 
     mid_angle = math.radians((theta1 + theta2) / 2)
-    arc_mid_x = x + (FANOUT_ARC_WIDTH / 2) * math.cos(mid_angle)
-    arc_mid_y = anchor_y + (FANOUT_ARC_HEIGHT / 2) * math.sin(mid_angle)
+    arc_mid_x = x + (geometry.fanout_arc_width / 2) * math.cos(mid_angle)
+    arc_mid_y = anchor_y + (geometry.fanout_arc_height / 2) * math.sin(mid_angle)
     label_x = arc_mid_x + label_padding * math.cos(mid_angle)
     label_y = arc_mid_y + label_padding * math.sin(mid_angle)
+    label_y += 0.08 if direction == "up" else -0.08
 
     return {
         "center": (x, anchor_y),
-        "width": FANOUT_ARC_WIDTH,
-        "height": FANOUT_ARC_HEIGHT,
+        "width": geometry.fanout_arc_width,
+        "height": geometry.fanout_arc_height,
         "theta1": theta1,
         "theta2": theta2,
-        "label": format_fanout_label(total_cables, next(iter(bandwidths))),
+        "label": format_fanout_label(total_cables, total_bandwidth_gb),
         "label_pos": (label_x, label_y),
     }
 
@@ -350,34 +512,35 @@ def get_leftmost_visible_nodes_by_layer(
     pos: dict[str, tuple[float, float]],
     visible_nodes: set[str],
 ) -> dict[int, str]:
-    """Select a single visible node per layer to anchor fanout annotations."""
     leftmost_nodes: dict[int, str] = {}
     for node in visible_nodes:
         layer_index = graph.nodes[node]["layer_index"]
-        if layer_index not in leftmost_nodes or pos[node][0] < pos[leftmost_nodes[layer_index]][0]:
+        if (
+            layer_index not in leftmost_nodes
+            or pos[node][0] < pos[leftmost_nodes[layer_index]][0]
+        ):
             leftmost_nodes[layer_index] = node
     return leftmost_nodes
 
 
 def draw_layer_bandwidth_indicators(
     graph: nx.Graph,
-    ax: plt.Axes,
+    ax: Any,
     pos: dict[str, tuple[float, float]],
     visible_nodes: set[str],
+    geometry: NodeBoxGeometry,
 ) -> None:
-    """Draw aggregate bandwidth indicators once per layer on the leftmost visible node."""
     for node in get_leftmost_visible_nodes_by_layer(graph, pos, visible_nodes).values():
-        add_bandwidth_indicators(ax, pos, node, graph.nodes[node])
+        add_bandwidth_indicators(ax, pos, node, graph.nodes[node], geometry)
 
 
 def draw_fanout_annotations(
     graph: nx.Graph,
-    ax: plt.Axes,
+    ax: Any,
     pos: dict[str, tuple[float, float]],
     visible_nodes: set[str],
-    node_half_height: float = 0.15,
+    geometry: NodeBoxGeometry,
 ) -> None:
-    """Draw arc-based cable bundle annotations at visible node fanouts."""
     for node in get_leftmost_visible_nodes_by_layer(graph, pos, visible_nodes).values():
         for direction in ("up", "down"):
             annotation = get_fanout_annotation(
@@ -386,7 +549,7 @@ def draw_fanout_annotations(
                 visible_nodes,
                 node,
                 direction,
-                node_half_height=node_half_height,
+                geometry,
             )
             if not annotation:
                 continue
@@ -410,211 +573,92 @@ def draw_fanout_annotations(
                 ha="center",
                 va="center",
                 zorder=4,
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=0.2),
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.92, pad=0.2),
             )
 
 
-def calculate_node_positions(
-    layer_index: int,
-    nodes: list[str],
-) -> dict[str, tuple[float, float]]:
-    """Calculate the positions of nodes in a layer."""
-    positions: dict[str, tuple[float, float]] = {}
-    min_spacing = 1.2
-    y_position = get_layer_height(layer_index)
+def visualize_topology(graph: nx.Graph, output_dir: str | None = None) -> None:
+    if is_multi_fabric_graph(graph):
+        for fabric_name in get_fabric_names(graph):
+            _visualize_single_topology(
+                get_fabric_view(graph, fabric_name),
+                output_dir,
+                filename=f"topology_{build_fabric_output_name(fabric_name)}.png",
+                title=f"Network Topology ({fabric_name})",
+            )
+        return
 
-    if len(nodes) > 2:
-        positions[nodes[0]] = (CONDENSED_LEFT_X, y_position)
-        positions[nodes[-1]] = (CONDENSED_RIGHT_X, y_position)
-    else:
-        total_width = (len(nodes) - 1) * min_spacing
-        start_x = -total_width / 2
-        for index, node in enumerate(nodes):
-            positions[node] = (float(start_x + (index * min_spacing)), y_position)
-
-    return positions
+    _visualize_single_topology(graph, output_dir)
 
 
-def draw_condensed_layer(
+def _visualize_single_topology(
     graph: nx.Graph,
-    ax: plt.Axes,
-    positions: dict[str, tuple[float, float]],
-    layer_index: int,
-    color: str,
-) -> tuple[set[str], list[str]]:
-    """Draw condensed nodes for a layer."""
-    node_size = 2500
-    node_names = [
-        node
-        for node, data in graph.nodes(data=True)
-        if data["layer_index"] == layer_index
-    ]
-    visible_nodes: set[str] = set()
-    nodes_to_draw = [node_names[0], node_names[-1]] if len(node_names) > 2 else node_names
-    visible_nodes.update(nodes_to_draw)
+    output_dir: str | None = None,
+    filename: str = "topology.png",
+    title: str = "Network Topology",
+) -> None:
+    logger.info("Starting topology visualization")
 
-    nx.draw_networkx_nodes(
-        graph,
-        positions,
-        nodelist=nodes_to_draw,
-        node_color=color,
-        node_size=node_size,
-        node_shape="s",
-        edgecolors="black",
-    )
+    layout = calculate_layout(graph)
+    x_limits, y_limits = calculate_plot_limits(layout)
+    figure_width, figure_height = build_figure_size(x_limits, y_limits, layout.profile)
+    _, ax = plt.subplots(figsize=(figure_width, figure_height))
+    bandwidth_colors = get_bandwidth_colors(graph)
+    geometry = layout.profile.node_box
 
-    for node in nodes_to_draw:
-        used_ports_equivalent = graph.nodes[node]["used_ports_equivalent"]
-        total_ports = graph.nodes[node]["total_ports"]
-        name, node_id = split_node_label(node)
-
-        for index, line in enumerate((name, node_id)):
-            ax.text(
-                positions[node][0],
-                positions[node][1] + 0.05 - (index * 0.07),
-                line,
-                fontsize=NODE_NAME_FONT_SIZE if index == 0 else NODE_METADATA_FONT_SIZE,
-                ha="center",
-                va="center",
-            )
-
-        ax.text(
-            positions[node][0],
-            positions[node][1] + PORT_USAGE_VALUE_Y_OFFSET,
-            f"{used_ports_equivalent:.0f}/{total_ports}",
-            fontsize=PORT_USAGE_VALUE_FONT_SIZE,
-            ha="center",
-            va="center",
-        )
-        ax.text(
-            positions[node][0],
-            positions[node][1] + PORT_USAGE_LABEL_Y_OFFSET,
-            "ports used",
-            fontsize=PORT_USAGE_LABEL_FONT_SIZE,
-            ha="center",
-            va="center",
-        )
-
-    if len(node_names) > 2:
-        center_y = get_layer_height(layer_index)
+    for left, bottom, width, height, label in layout.group_bounds:
         ax.add_patch(
             Rectangle(
-                (
-                    CONDENSED_CENTER_X - (CONDENSED_PLACEHOLDER_WIDTH / 2),
-                    center_y - (CONDENSED_PLACEHOLDER_HEIGHT / 2),
-                ),
-                CONDENSED_PLACEHOLDER_WIDTH,
-                CONDENSED_PLACEHOLDER_HEIGHT,
-                facecolor="white",
-                edgecolor="none",
+                (left, bottom),
+                width,
+                height,
+                facecolor="none",
+                edgecolor="#666666",
+                linestyle="--",
+                linewidth=1.0,
                 zorder=0,
             )
         )
         ax.text(
-            CONDENSED_CENTER_X,
-            center_y,
-            format_hidden_node_label(len(node_names) - 2),
-            horizontalalignment="center",
-            verticalalignment="center",
+            left + (width / 2),
+            bottom - 0.28,
+            label,
+            ha="center",
+            va="top",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    for x, y, text in layout.placeholder_labels:
+        ax.text(
+            x,
+            y,
+            text,
+            ha="center",
+            va="center",
+            fontsize=13,
+            fontweight="bold",
             fontfamily="monospace",
-            fontsize=8,
+            zorder=1,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=0.2),
         )
 
-    return visible_nodes, node_names
+    for source, target in graph.edges():
+        if source not in layout.visible_nodes or target not in layout.visible_nodes:
+            continue
 
-
-def get_bandwidth_colors(graph: nx.Graph) -> dict[float, str]:
-    """Get stable link colors for each unique cable bandwidth."""
-    unique_bandwidths = sorted(
-        {
-            data.get("cable_bandwidth_gb")
-            for _, _, data in graph.edges(data=True)
-            if data.get("cable_bandwidth_gb") is not None
-        }
-    )
-
-    bandwidth_colors = {bandwidth: "black" for bandwidth in unique_bandwidths}
-    if len(unique_bandwidths) > 1:
-        bandwidth_colors = {
-            bandwidth: (
-                "black"
-                if index == 0
-                else LINK_COLOR_PALETTE[(index - 1) % len(LINK_COLOR_PALETTE)]
-            )
-            for index, bandwidth in enumerate(unique_bandwidths)
-        }
-    return bandwidth_colors
-
-
-def get_nodes_by_layer(graph: nx.Graph) -> dict[int, list[str]]:
-    """Cache node names per layer in insertion order."""
-    nodes_by_layer: dict[int, list[str]] = {}
-    for node, data in graph.nodes(data=True):
-        nodes_by_layer.setdefault(data["layer_index"], []).append(node)
-    return dict(sorted(nodes_by_layer.items()))
-
-
-def calculate_plot_limits(
-    pos: dict[str, tuple[float, float]],
-    visible_nodes: set[str],
-) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Calculate plot limits from the rendered nodes."""
-    if not visible_nodes:
-        return (-3.0, 3.5), (-0.5, 1.5)
-
-    x_values = [pos[node][0] for node in visible_nodes]
-    y_values = [pos[node][1] for node in visible_nodes]
-    return (
-        (min(x_values) - 1.0, max(x_values) + 1.5),
-        (min(y_values) - 0.5, max(y_values) + 0.75),
-    )
-
-
-def visualize_topology(graph: nx.Graph, output_dir: str | None = None) -> None:
-    """Visualize the network topology graph with colored edges by bandwidth."""
-    logger.info("Starting topology visualization")
-
-    _, ax = plt.subplots(figsize=(12, 8))
-    nodes_by_layer = get_nodes_by_layer(graph)
-    layer_positions: dict[str, tuple[float, float]] = {}
-
-    for layer_index, nodes in nodes_by_layer.items():
-        layer_positions.update(calculate_node_positions(layer_index, nodes))
-
-    visible_nodes: set[str] = set()
-    layer_node_names: dict[int, list[str]] = {}
-    for layer_index, nodes in nodes_by_layer.items():
-        visible_set, node_names = draw_condensed_layer(
-            graph,
-            ax,
-            layer_positions,
-            layer_index,
-            get_layer_color(layer_index),
-        )
-        visible_nodes.update(visible_set)
-        layer_node_names[layer_index] = node_names
-
-    visible_edges = [
-        (source, target)
-        for source, target in graph.edges()
-        if source in visible_nodes and target in visible_nodes
-    ]
-    node_half_height = 0.15
-    bandwidth_colors = get_bandwidth_colors(graph)
-
-    for source, target in visible_edges:
-        x1, y1 = layer_positions[source]
-        x2, y2 = layer_positions[target]
+        x1, y1 = layout.positions[source]
+        x2, y2 = layout.positions[target]
         bandwidth = graph.edges[source, target].get("cable_bandwidth_gb", 0)
         num_cables = graph.edges[source, target].get("num_cables", 1)
         color = bandwidth_colors[bandwidth]
 
         if y1 < y2:
-            y1 += node_half_height
-            y2 -= node_half_height
+            y1 += geometry.half_height
+            y2 -= geometry.half_height
         else:
-            y1 -= node_half_height
-            y2 += node_half_height
+            y1 -= geometry.half_height
+            y2 += geometry.half_height
 
         plt.plot([x1, x2], [y1, y2], "-", color=color, linewidth=2, zorder=1)
 
@@ -635,62 +679,607 @@ def visualize_topology(graph: nx.Graph, output_dir: str | None = None) -> None:
                 fontsize=8,
             )
 
-    draw_layer_bandwidth_indicators(graph, ax, layer_positions, visible_nodes)
+    draw_visible_nodes(graph, ax, layout.positions, layout.visible_nodes, geometry)
+    draw_layer_bandwidth_indicators(
+        graph,
+        ax,
+        layout.positions,
+        layout.visible_nodes,
+        geometry,
+    )
     draw_fanout_annotations(
         graph,
         ax,
-        layer_positions,
-        visible_nodes,
-        node_half_height=node_half_height,
+        layout.positions,
+        layout.visible_nodes,
+        geometry,
     )
 
-    layer_indices = sorted(layer_node_names)
+    all_nodes_by_layer = get_all_nodes_by_layer(graph)
+    layer_indices = sorted(all_nodes_by_layer)
     for lower_index, upper_index in zip(layer_indices[:-1], layer_indices[1:]):
         layer_bandwidth = calculate_layer_bandwidth(
             graph,
-            layer_node_names[lower_index],
-            layer_node_names[upper_index],
+            all_nodes_by_layer[lower_index],
+            all_nodes_by_layer[upper_index],
         )
         if layer_bandwidth > 0:
             add_layer_bandwidth_arrow(
                 ax,
-                get_layer_height(lower_index),
-                get_layer_height(upper_index),
+                layout.layer_heights[lower_index],
+                layout.layer_heights[upper_index],
                 layer_bandwidth,
+                layout.layer_bandwidth_x,
             )
 
-    if len(bandwidth_colors) > 1:
-        legend_elements = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor="w",
-                markeredgecolor="black",
-                markersize=10,
-                label="Cable count",
-            )
-        ]
-        for bandwidth, color in bandwidth_colors.items():
-            legend_elements.append(
-                Patch(
-                    facecolor=color,
-                    label=format_bandwidth(float(bandwidth)),
-                )
-            )
+    draw_group_bandwidth_arrows(graph, ax, layout)
 
-        ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(0.02, 0.98))
+    legend_elements = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor="w",
+            markeredgecolor="black",
+            markersize=10,
+            label="Cable count",
+        )
+    ]
+    for bandwidth, color in bandwidth_colors.items():
+        legend_elements.append(
+            Patch(
+                facecolor=color,
+                label=format_bandwidth(float(bandwidth)),
+            )
+        )
 
-    x_limits, y_limits = calculate_plot_limits(layer_positions, visible_nodes)
+    ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(0.01, 0.99))
+
     plt.xlim(*x_limits)
     plt.ylim(*y_limits)
-    plt.title("Network Topology")
+    plt.title(title)
     plt.axis("off")
 
     if output_dir:
-        output_path = f"{output_dir}/topology.png"
-        plt.savefig(output_path, bbox_inches="tight", dpi=300, pad_inches=0.5)
+        output_path = f"{output_dir}/{filename}"
+        plt.savefig(
+            output_path,
+            bbox_inches="tight",
+            dpi=300,
+            pad_inches=layout.profile.save_padding_inches,
+        )
         logger.info("Saved topology visualization to %s", output_path)
     else:
         plt.show()
+
+    plt.close()
+
+
+def calculate_layout(graph: nx.Graph) -> LayoutResult:
+    positions: dict[str, tuple[float, float]] = {}
+    visible_nodes: set[str] = set()
+    placeholder_labels: list[tuple[float, float, str]] = []
+    sorted_nodes = get_sorted_node_items(graph)
+
+    grouped_layers = get_grouped_layer_nodes(graph)
+    grouped_layer_indices = sorted(grouped_layers)
+    group_indices = sorted(
+        {
+            data["group_index"]
+            for _, data in sorted_nodes
+            if data.get("group_index") is not None
+        }
+    )
+    total_group_count = len(group_indices)
+    profile = build_layout_profile(total_group_count)
+    layer_heights = compute_layer_heights(graph, profile)
+    visible_group_indices = select_visible_group_indices(group_indices)
+    group_centers, hidden_placeholder_x = compute_group_lane_layout(
+        total_group_count,
+        visible_group_indices,
+        profile,
+    )
+
+    for layer_index, group_nodes in grouped_layers.items():
+        y = layer_heights[layer_index]
+        for group_index in visible_group_indices:
+            nodes = group_nodes.get(group_index, [])
+            if not nodes:
+                continue
+            visible_group_nodes, hidden_count = select_visible_nodes(nodes)
+            positions.update(
+                assign_node_positions(
+                    visible_group_nodes,
+                    group_centers[group_index],
+                    y,
+                    profile.grouped_node_offset,
+                )
+            )
+            visible_nodes.update(visible_group_nodes)
+            if hidden_count > 0:
+                placeholder_labels.append(
+                    (group_centers[group_index], y, format_hidden_node_label(hidden_count))
+                )
+
+    grouped_content_half_span = max(
+        (
+            abs(x) + (profile.node_box.width / 2)
+            for node, (x, _) in positions.items()
+            if graph.nodes[node].get("group_index") is not None
+        ),
+        default=0.0,
+    )
+
+    for layer_index, nodes in get_global_layer_nodes(graph).items():
+        y = layer_heights[layer_index]
+        visible_layer_nodes, hidden_count = select_visible_nodes(nodes)
+        node_offset = profile.global_node_offset
+        if hidden_count > 0:
+            placeholder_half_width = estimate_text_half_width(
+                format_hidden_node_label(hidden_count),
+                profile,
+            )
+            node_offset = max(
+                node_offset,
+                placeholder_half_width + (profile.node_box.width / 2) + 0.4,
+            )
+            if grouped_content_half_span > 0:
+                node_offset = max(
+                    node_offset,
+                    grouped_content_half_span - (profile.node_box.width * 2.0),
+                )
+        positions.update(
+            assign_node_positions(
+                visible_layer_nodes,
+                0.0,
+                y,
+                node_offset,
+            )
+        )
+        visible_nodes.update(visible_layer_nodes)
+        if hidden_count > 0:
+            placeholder_labels.append((0.0, y, format_hidden_node_label(hidden_count)))
+
+    group_bounds = compute_group_container_bounds(
+        graph,
+        positions,
+        grouped_layer_indices,
+        visible_group_indices,
+        profile,
+    )
+
+    if hidden_placeholder_x is not None and grouped_layer_indices:
+        grouped_min_y = layer_heights[min(grouped_layer_indices)]
+        grouped_max_y = layer_heights[max(grouped_layer_indices)]
+        placeholder_labels.append(
+            (
+                hidden_placeholder_x,
+                (grouped_min_y + grouped_max_y) / 2,
+                format_hidden_group_label(total_group_count - len(visible_group_indices)),
+            )
+        )
+
+    layer_bandwidth_x = compute_annotation_columns(positions, group_bounds, profile)
+    return LayoutResult(
+        positions=positions,
+        visible_nodes=visible_nodes,
+        group_bounds=group_bounds,
+        placeholder_labels=placeholder_labels,
+        profile=profile,
+        layer_bandwidth_x=layer_bandwidth_x,
+        layer_heights=layer_heights,
+    )
+
+
+def get_grouped_layer_nodes(graph: nx.Graph) -> dict[int, dict[int, list[str]]]:
+    grouped_layers: dict[int, dict[int, list[str]]] = {}
+    for node, data in get_sorted_node_items(graph):
+        group_index = data.get("group_index")
+        if group_index is None:
+            continue
+        grouped_layers.setdefault(data["layer_index"], {}).setdefault(group_index, []).append(node)
+    return grouped_layers
+
+
+def get_global_layer_nodes(graph: nx.Graph) -> dict[int, list[str]]:
+    global_layers: dict[int, list[str]] = {}
+    for node, data in get_sorted_node_items(graph):
+        if data.get("group_index") is not None:
+            continue
+        global_layers.setdefault(data["layer_index"], []).append(node)
+    return global_layers
+
+
+def get_all_nodes_by_layer(graph: nx.Graph) -> dict[int, list[str]]:
+    layers: dict[int, list[str]] = {}
+    for node, data in get_sorted_node_items(graph):
+        layers.setdefault(data["layer_index"], []).append(node)
+    return layers
+
+
+def compute_layer_heights(graph: nx.Graph, profile: LayoutProfile) -> dict[int, float]:
+    sorted_nodes = get_sorted_node_items(graph)
+    layer_indices = sorted({data["layer_index"] for _, data in sorted_nodes})
+    grouped_layers = {
+        data["layer_index"]
+        for _, data in sorted_nodes
+        if data.get("group_index") is not None
+    }
+
+    heights: dict[int, float] = {}
+    current_y = 0.0
+    previous_layer_index: int | None = None
+    for layer_index in layer_indices:
+        if previous_layer_index is not None:
+            current_y += profile.layer_spacing
+            if previous_layer_index in grouped_layers and layer_index not in grouped_layers:
+                current_y += profile.layer_spacing * 0.1
+        heights[layer_index] = current_y
+        previous_layer_index = layer_index
+
+    return heights
+
+
+def _node_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, int, int, str]:
+    node, data = item
+    return (
+        data["layer_index"],
+        data.get("group_order") or data.get("group_index") or 0,
+        data.get("node_ordinal", 0),
+        node,
+    )
+
+
+def compute_group_container_bounds(
+    graph: nx.Graph,
+    positions: dict[str, tuple[float, float]],
+    grouped_layer_indices: list[int],
+    visible_group_indices: list[int],
+    profile: LayoutProfile,
+) -> list[tuple[float, float, float, float, str]]:
+    if not grouped_layer_indices or not visible_group_indices:
+        return []
+
+    bounds: list[tuple[float, float, float, float, str]] = []
+    layer_heights = compute_layer_heights(graph, profile)
+    min_layer_y = layer_heights[min(grouped_layer_indices)]
+    max_layer_y = layer_heights[max(grouped_layer_indices)]
+    bottom = min_layer_y - profile.node_box.half_height - profile.group_vertical_padding
+    top = max_layer_y + profile.node_box.half_height + profile.group_vertical_padding
+    visible_nodes = set(positions)
+    leftmost_nodes_by_layer = get_leftmost_visible_nodes_by_layer(graph, positions, visible_nodes)
+    leftmost_visible_group = min(visible_group_indices)
+    rightmost_visible_group = max(visible_group_indices)
+    outer_padding = profile.group_side_padding * 0.8
+    inner_padding = profile.group_side_padding * 0.4
+
+    for group_index in visible_group_indices:
+        group_nodes = [
+            node
+            for node, data in graph.nodes(data=True)
+            if data.get("group_index") == group_index and node in positions
+        ]
+        left = min(positions[node][0] - (profile.node_box.width / 2) for node in group_nodes)
+        right = max(positions[node][0] + (profile.node_box.width / 2) for node in group_nodes)
+
+        if group_index == leftmost_visible_group:
+            for node in leftmost_nodes_by_layer.values():
+                node_data = graph.nodes[node]
+                if node_data.get("group_index") != group_index:
+                    continue
+                if node_data["layer_index"] not in grouped_layer_indices:
+                    continue
+                symbol_x = positions[node][0] + profile.node_box.aggregate_x_offset
+                max_bandwidth = max(
+                    float(node_data.get("aggregate_bandwidth_up", 0)),
+                    float(node_data.get("aggregate_bandwidth_down", 0)),
+                )
+                if max_bandwidth > 0:
+                    label = format_bandwidth(max_bandwidth)
+                    left = min(
+                        left,
+                        symbol_x
+                        - profile.node_box.aggregate_text_offset
+                        - estimate_text_width(label, profile),
+                    )
+                else:
+                    left = min(left, symbol_x)
+
+        if group_index == rightmost_visible_group:
+            x_pos = compute_group_bandwidth_arrow_x(graph, positions, profile, group_index)
+            for lower_index, upper_index in zip(grouped_layer_indices[:-1], grouped_layer_indices[1:]):
+                bandwidth = calculate_group_layer_bandwidth(
+                    graph,
+                    lower_index,
+                    upper_index,
+                    group_index,
+                )
+                if bandwidth <= 0:
+                    continue
+                right = max(
+                    right,
+                    x_pos + 0.22 + estimate_text_width(format_bandwidth(bandwidth), profile),
+                )
+
+        if group_index == leftmost_visible_group:
+            left -= outer_padding
+            right += inner_padding
+        elif group_index == rightmost_visible_group:
+            left -= inner_padding
+            right += outer_padding
+        else:
+            left -= outer_padding
+            right += outer_padding
+        bounds.append(
+            (
+                left,
+                bottom,
+                right - left,
+                top - bottom,
+                str(graph.nodes[group_nodes[0]].get("group_label") or f"group_{group_index}"),
+            )
+        )
+
+    return bounds
+
+
+def select_visible_nodes(nodes: list[str]) -> tuple[list[str], int]:
+    if len(nodes) <= 2:
+        return nodes, 0
+    return [nodes[0], nodes[-1]], len(nodes) - 2
+
+
+def assign_node_positions(
+    nodes: list[str],
+    center_x: float,
+    y: float,
+    node_offset: float,
+) -> dict[str, tuple[float, float]]:
+    if not nodes:
+        return {}
+    if len(nodes) == 1:
+        return {nodes[0]: (center_x, y)}
+    return {
+        nodes[0]: (center_x - node_offset, y),
+        nodes[-1]: (center_x + node_offset, y),
+    }
+
+
+def draw_visible_nodes(
+    graph: nx.Graph,
+    ax: Any,
+    positions: dict[str, tuple[float, float]],
+    visible_nodes: set[str],
+    geometry: NodeBoxGeometry,
+) -> None:
+    for node in sorted(
+        visible_nodes,
+        key=lambda item: (graph.nodes[item]["layer_index"], positions[item][0]),
+    ):
+        x, y = positions[node]
+        data = graph.nodes[node]
+        ax.add_patch(
+            Rectangle(
+                (x - (geometry.width / 2), y - (geometry.height / 2)),
+                geometry.width,
+                geometry.height,
+                facecolor=get_layer_color(data["layer_index"]),
+                edgecolor="black",
+                zorder=2,
+            )
+        )
+        ax.text(
+            x,
+            y + geometry.name_y_offset,
+            format_node_name(data["layer_name"]),
+            fontsize=NODE_NAME_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y + geometry.ordinal_y_offset,
+            str(data["node_ordinal"]),
+            fontsize=NODE_METADATA_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y + geometry.ports_value_y_offset,
+            f"{data['used_lane_units']}/{data['total_lane_units']}",
+            fontsize=PORT_USAGE_VALUE_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y + geometry.ports_label_y_offset,
+            "lanes used",
+            fontsize=PORT_USAGE_LABEL_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+
+
+def compute_annotation_columns(
+    positions: dict[str, tuple[float, float]],
+    group_bounds: list[tuple[float, float, float, float, str]],
+    profile: LayoutProfile,
+) -> float:
+    content_right = max(
+        [x for x, _ in positions.values()]
+        + [left + width for left, _, width, _, _ in group_bounds]
+        + [0.0]
+    )
+    return content_right + profile.right_annotation_gap
+
+
+def calculate_group_layer_bandwidth(
+    graph: nx.Graph,
+    lower_layer_index: int,
+    upper_layer_index: int,
+    group_index: int,
+) -> float:
+    total_bandwidth = 0.0
+    for source, target, attrs in graph.edges(data=True):
+        source_data = graph.nodes[source]
+        target_data = graph.nodes[target]
+        if source_data["layer_index"] == lower_layer_index and target_data["layer_index"] == upper_layer_index:
+            lower_node = source
+            upper_node = target
+        elif source_data["layer_index"] == upper_layer_index and target_data["layer_index"] == lower_layer_index:
+            lower_node = target
+            upper_node = source
+        else:
+            continue
+
+        if (
+            graph.nodes[lower_node].get("group_index") == group_index
+            and graph.nodes[upper_node].get("group_index") == group_index
+        ):
+            total_bandwidth += attrs.get("cable_bandwidth_gb", 0) * attrs.get("num_cables", 0)
+    return total_bandwidth
+
+
+def draw_group_bandwidth_arrows(
+    graph: nx.Graph,
+    ax: Any,
+    layout: LayoutResult,
+) -> None:
+    if not layout.group_bounds:
+        return
+
+    group_indexes = {
+        graph.nodes[node].get("group_index")
+        for node in layout.positions
+        if graph.nodes[node].get("group_index") is not None
+    }
+    if not group_indexes:
+        return
+
+    group_index = max(
+        group_indexes,
+        key=lambda index: compute_group_bandwidth_arrow_x(
+            graph,
+            layout.positions,
+            layout.profile,
+            index,
+        ),
+    )
+
+    grouped_layers = sorted(
+        {
+            data["layer_index"]
+            for _, data in graph.nodes(data=True)
+            if data.get("group_index") is not None
+        }
+    )
+    if len(grouped_layers) < 2:
+        return
+
+    x_pos = compute_group_bandwidth_arrow_x(graph, layout.positions, layout.profile, group_index)
+    for lower_index, upper_index in zip(grouped_layers[:-1], grouped_layers[1:]):
+        bandwidth = calculate_group_layer_bandwidth(
+            graph,
+            lower_index,
+            upper_index,
+            group_index,
+        )
+        if bandwidth <= 0:
+            continue
+        add_layer_bandwidth_arrow(
+            ax,
+            layout.layer_heights[lower_index],
+            layout.layer_heights[upper_index],
+            bandwidth,
+            x_pos,
+        )
+
+
+def compute_group_bandwidth_arrow_x(
+    graph: nx.Graph,
+    positions: dict[str, tuple[float, float]],
+    profile: LayoutProfile,
+    group_index: int,
+) -> float:
+    visible_group_node_right = max(
+        x + (profile.node_box.width / 2)
+        for node, (x, _) in positions.items()
+        if graph.nodes[node].get("group_index") == group_index
+    )
+    return visible_group_node_right + 0.18
+
+
+def calculate_plot_limits(
+    layout: LayoutResult,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    x_values = [x for x, _ in layout.positions.values()]
+    y_values = [y for _, y in layout.positions.values()]
+
+    for left, bottom, width, height, label in layout.group_bounds:
+        x_values.extend([left, left + width])
+        y_values.extend([bottom - 0.55, bottom, bottom + height])
+        x_values.extend(
+            [
+                left + (width / 2) - estimate_text_half_width(label, layout.profile),
+                left + (width / 2) + estimate_text_half_width(label, layout.profile),
+            ]
+        )
+
+    for x, y, text in layout.placeholder_labels:
+        half_width = estimate_text_half_width(text, layout.profile)
+        x_values.extend([x - half_width, x + half_width])
+        y_values.extend(
+            [
+                y - layout.profile.placeholder_text_height,
+                y + layout.profile.placeholder_text_height,
+            ]
+        )
+
+    x_values.append(layout.layer_bandwidth_x + layout.profile.right_annotation_extent)
+    y_values.extend(
+        [
+            min(y_values, default=0.0) - 0.25,
+            max(y_values, default=0.0) + 0.6,
+        ]
+    )
+
+    if not x_values or not y_values:
+        return (-3.0, 3.5), (-0.5, 1.5)
+
+    return (
+        (
+            min(x_values) - layout.profile.plot_padding_x,
+            max(x_values) + layout.profile.plot_padding_x,
+        ),
+        (
+            min(y_values) - layout.profile.plot_padding_y,
+            max(y_values) + layout.profile.plot_padding_y,
+        ),
+    )
+
+
+def estimate_text_half_width(text: str, profile: LayoutProfile) -> float:
+    return max(0.6, len(text) * profile.placeholder_text_char_width)
+
+
+def estimate_text_width(text: str, profile: LayoutProfile) -> float:
+    return estimate_text_half_width(text, profile) * 2
+
+
+def build_figure_size(
+    x_limits: tuple[float, float],
+    y_limits: tuple[float, float],
+    profile: LayoutProfile,
+) -> tuple[float, float]:
+    width_span = max(1.0, x_limits[1] - x_limits[0])
+    height_span = max(1.0, y_limits[1] - y_limits[0])
+    figure_height = profile.figure_width * (height_span / width_span)
+    figure_height = min(profile.figure_height_max, max(profile.figure_height_min, figure_height))
+    return profile.figure_width, figure_height

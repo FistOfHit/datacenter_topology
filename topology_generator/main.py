@@ -49,8 +49,8 @@ def main():
         save_to_excel(port_mapping, args.output_dir)
         logger.info("Successfully created cut-sheet/port-mapping")
 
-    except Exception as e:
-        logger.error(f"Error during execution: {str(e)}")
+    except Exception:
+        logger.exception("Error during execution")
         raise
 
 

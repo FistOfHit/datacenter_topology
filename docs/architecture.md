@@ -2,68 +2,115 @@
 
 ## Execution Flow
 
-The application is a single CLI pipeline:
+The application remains a single CLI pipeline:
 
 1. Parse arguments.
 2. Create the output directory and configure logging.
 3. Load and validate YAML into `TopologyConfig`.
-4. Build a `networkx.Graph` representing the ordered-layer topology.
-5. Render the graph to `topology.png`.
-6. Flatten graph edges into a port-mapping DataFrame.
-7. Write the Excel output.
+4. Normalize either single-fabric config or multi-fabric shared-endpoint config into effective per-fabric topologies.
+5. Expand grouped layers into concrete nodes and concrete link bundles.
+6. Validate the expanded topology per node.
+7. Build a `networkx.Graph`.
+8. Render `topology.png` or per-fabric `topology_<fabric>.png`.
+9. Flatten graph edges into `port_mapping.xlsx`.
 
 ## Core Modules
 
 ### `config_schema.py`
 
-Defines the validated config model:
+Defines the grouped config model.
 
-- `LayerConfig`: per-layer node counts, port capacity, and adjacent-layer link settings.
-- `TopologyConfig`: validated ordered layer list with dict-like compatibility.
+- `GroupConfig`
+- `GroupingConfig`
+- `PortModeConfig`
+- `PortLayoutConfig`
+- `LayerConfig`
+- `LinkConfig`
+- `FabricConfig`
+- `GpuNodesConfig`
+- `TopologyConfig`
 
-Validation enforces:
+Semantic validation enforces:
 
-- at least two layers
-- positive node counts
-- boundary-layer omission rules for non-existent directions
-- exact reciprocity between adjacent layers
-- cable bandwidth not exceeding either endpoint port speed
-- enough physical ports for the dense adjacent-layer cabling pattern
+- one repeated group at most
+- unique literal and normalized group, grouping, layer, and fabric names
+- valid placements
+- adjacent-layer-only links
+- policy/placement compatibility
+- valid lane-based port layouts
+- link bandwidth support against endpoint port modes
+- exact correspondence between `gpu_nodes.fabric_port_layouts` and `fabrics`
+- a clean nesting chain across `groupings`
+- `gpu_nodes` as the only shared layer in multi-fabric mode
 
-Aggregate bandwidth is no longer configured directly. It is derived from layer sizes and adjacent link settings.
+### `expander.py`
+
+Turns the validated grouped config into concrete intent:
+
+- expands group instances
+- expands concrete nodes
+- expands concrete link bundles
+- resolves the selected grouping for each fabric
+- duplicates shared `gpu_nodes` intent per fabric for validation while retaining a shared physical graph node ID
+- resolves per-end lane consumption for each cable bandwidth
+
+This module does not mutate a graph. It is a pure expansion stage that makes later validation and testing straightforward.
+
+### `validator.py`
+
+Validates the expanded topology:
+
+- computes required lane units per node
+- computes per-node up/down bandwidth usage
+- verifies that each node supports the requested cable bandwidth
+- checks that aggregate lane consumption fits the hardware budget
+
+For multi-fabric runs, validation remains fabric-local even on shared `gpu_nodes`.
+
+All validation is performed against the expanded node IDs that will appear in the graph and cut-sheet.
 
 ### `topology_generator.py`
 
-Responsible for graph construction.
+Orchestrates grouped topology generation:
 
-- Creates nodes for each configured layer.
-- Stores `layer_index` and `layer_name` on every node.
-- Derives up/down aggregate bandwidth metadata from adjacent-layer definitions.
-- Connects adjacent layers in a dense pattern until the derived per-node bandwidth budget is consumed.
-- Tracks per-node bandwidth usage and computes a ports-used equivalent value.
+- validates the config
+- expands it
+- validates expanded intent
+- creates graph nodes and graph edges
+- assigns deterministic contiguous base-lane spans per cable
+- stores lane-based usage metadata on nodes and edges
+- keeps one giant graph for all fabrics while storing per-fabric grouping-aware metrics on shared `gpu_nodes`
+- exposes helpers to derive a flattened per-fabric graph view for downstream consumers
 
 ### `visualiser.py`
 
-Responsible for diagram generation.
+Responsible for grouped condensed rendering.
 
-- Positions nodes by `layer_index`.
-- Condenses layers with more than two nodes to first/last plus a placeholder label.
-- Draws link counts, aggregate bandwidth markers, and fanout annotations.
-- Uses deterministic colors for both layers and multi-bandwidth links.
+- renders first and last visible groups when many groups exist
+- renders first and last visible nodes inside a rendered group/layer when many nodes exist
+- keeps global layers separate from grouped local layers
+- draws aggregate bandwidth indicators and fanout annotations from the actual graph
+- shows lane consumption per node rather than a single-speed port-equivalent metric
+- renders each multi-fabric graph through an isolated per-fabric view
 
 ### `port_mapper.py`
 
 Responsible for the Excel cut-sheet data.
 
-- Converts graph edges into one row per cable.
-- Normalizes row orientation so lower-index layers appear as sources.
-- Writes `port_mapping.xlsx`.
+- converts graph edges into one row per cable
+- includes explicit source and target group columns
+- includes per-end base-lane start indices and lane widths
+- normalizes source/target orientation to lower layer -> higher layer
+- merges per-fabric tables into one workbook in multi-fabric mode and adds a `fabric` column
+- writes `port_mapping.xlsx`
 
-## Testing Strategy
+## Design Notes
 
-The repo uses behavior-first tests across two-layer and four-layer configs:
-
-- unit tests for config validation, topology invariants, port-map extraction, logging, CLI parsing, and visualization helpers
-- integration coverage for the full CLI pipeline, including output creation
-
-Tests constrain public behavior rather than internal call structure.
+- The grouped model is explicit. There is no hidden derivation of pod counts or placement scopes.
+- Multi-fabric mode always shares only layer 0, exposed in YAML as `gpu_nodes`.
+- Multi-fabric group membership is defined centrally in `groupings`; each fabric selects one grouping namespace and uses `placement: group` for grouping-relative layers.
+- Links remain adjacent-layer only within each fabric's effective layer order.
+- Validation is performed after expansion so grouped fabrics and shared `gpu_nodes` are checked against the actual intended link set.
+- Shared endpoint graph node IDs stay grouping-neutral so multiple fabrics can view the same physical endpoints through different groupings without collisions.
+- Port hardware is modeled in lane units so a single switch can expose multiple logical port speeds, such as `128 x 400G` or `64 x 800G`, without duplicating the layer.
+- The renderer is deliberately condensed; it is a planning view rather than a physical layout drawing.
