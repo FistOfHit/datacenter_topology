@@ -165,6 +165,55 @@ def test_create_port_mapping_merges_multi_fabric_rows(multi_fabric_config):
     }
 
 
+def test_create_port_mapping_preserves_multi_fabric_order_and_cable_numbers(
+    multi_fabric_config,
+):
+    from topology_generator.topology_generator import generate_topology
+
+    df = create_port_mapping(generate_topology(multi_fabric_config))
+
+    assert list(df["fabric"]) == [
+        "backend",
+        "backend",
+        "backend",
+        "frontend",
+        "frontend",
+        "oob",
+        "oob",
+    ]
+    assert list(df["cable_number"]) == [1, 2, 3, 4, 5, 6, 7]
+    assert df.iloc[0].to_dict() == {
+        "fabric": "backend",
+        "source_serial_number": None,
+        "source_group": "pod_1",
+        "source_node_id": "gpu_nodes_1",
+        "source_node_port": 1,
+        "source_lane_units": 1,
+        "target_node_port": 1,
+        "target_lane_units": 1,
+        "target_node_id": "backend__pod_1_leaf_1",
+        "target_group": "pod_1",
+        "target_serial_number": None,
+        "cable_bandwidth_gb": 100.0,
+        "cable_number": 1,
+    }
+    assert df.iloc[-1].to_dict() == {
+        "fabric": "oob",
+        "source_serial_number": None,
+        "source_group": "pod_1_rack_2",
+        "source_node_id": "gpu_nodes_2",
+        "source_node_port": 1,
+        "source_lane_units": 1,
+        "target_node_port": 2,
+        "target_lane_units": 1,
+        "target_node_id": "oob__mgmt_1",
+        "target_group": "global",
+        "target_serial_number": None,
+        "cable_bandwidth_gb": 25.0,
+        "cable_number": 7,
+    }
+
+
 def test_extract_port_mapping_rows_uses_natural_node_ordering():
     graph = nx.Graph()
     graph.add_node("pod_2_gpu_nodes_1", layer_index=0, group_label="pod_2")

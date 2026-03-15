@@ -1,5 +1,4 @@
 import argparse
-from topology_generator.file_handler import get_timestamped_dir
 
 
 def parse_args():
@@ -31,10 +30,4 @@ def parse_args():
         help="Add timestamp to output directory",
     )
 
-    args = parser.parse_args()
-
-    # Apply timestamp to output directory if requested
-    if args.timestamp:
-        args.output_dir = get_timestamped_dir(args.output_dir)
-
-    return args
+    return parser.parse_args()

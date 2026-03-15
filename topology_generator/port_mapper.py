@@ -1,14 +1,25 @@
+from os import PathLike
 from pathlib import Path
-import re
-from typing import TypedDict, cast
+from dataclasses import dataclass
+from typing import cast
 
 import networkx as nx
 import pandas as pd
 
+from topology_generator.graph_metadata import (
+    EdgeAttrs,
+    NodeAttrs,
+    OrientedEdgeAllocation,
+    cable_bandwidth_gb,
+    fabric_name_for_edge,
+    flatten_node_attrs_for_fabric,
+    is_multi_fabric_graph,
+    natural_sort_key,
+    node_group_label,
+    node_sort_key,
+)
 from topology_generator.topology_generator import (
     get_fabric_names,
-    get_fabric_view,
-    is_multi_fabric_graph,
 )
 
 
@@ -29,33 +40,43 @@ PORT_MAPPING_COLUMNS = [
 MULTI_FABRIC_PORT_MAPPING_COLUMNS = ["fabric", *PORT_MAPPING_COLUMNS]
 
 
-class OrientedEdgeAllocation(TypedDict):
-    source_node_id: str
-    target_node_id: str
-    source_ports: list[int]
-    target_ports: list[int]
-    source_lane_units: int
-    target_lane_units: int
+@dataclass(frozen=True)
+class PortMappingContext:
+    fabric_name: str | None
+    node_attrs_by_id: dict[str, NodeAttrs]
+    node_sort_keys: dict[str, tuple[object, ...]]
 
 
 def extract_port_mapping_rows(graph: nx.Graph) -> list[dict[str, object]]:
     """Extract stable, per-cable mapping rows from the topology graph."""
     if not is_multi_fabric_graph(graph):
-        return _extract_single_fabric_rows(graph)
+        context = _build_port_mapping_context(graph)
+        single_fabric_rows, _ = _extract_rows_for_context(
+            context,
+            list(graph.edges(data=True)),
+            cable_counter=1,
+        )
+        return single_fabric_rows
 
     rows: list[dict[str, object]] = []
     cable_counter = 1
+    edges_by_fabric: dict[str, list[tuple[str, str, dict[str, object]]]] = {
+        fabric_name: [] for fabric_name in get_fabric_names(graph)
+    }
+    for source_node_id, target_node_id, attrs in graph.edges(data=True):
+        fabric_name = fabric_name_for_edge(cast(EdgeAttrs, attrs))
+        if fabric_name is None:
+            continue
+        edges_by_fabric[fabric_name].append((source_node_id, target_node_id, attrs))
+
     for fabric_name in get_fabric_names(graph):
-        fabric_rows = _extract_single_fabric_rows(get_fabric_view(graph, fabric_name))
-        for row in fabric_rows:
-            rows.append(
-                {
-                    "fabric": fabric_name,
-                    **row,
-                    "cable_number": cable_counter,
-                }
-            )
-            cable_counter += 1
+        context = _build_port_mapping_context(graph, fabric_name)
+        fabric_rows, cable_counter = _extract_rows_for_context(
+            context,
+            edges_by_fabric[fabric_name],
+            cable_counter,
+        )
+        rows.extend(fabric_rows)
     return rows
 
 
@@ -70,7 +91,9 @@ def create_port_mapping(graph: nx.Graph) -> pd.DataFrame:
 
 
 def save_to_excel(
-    df: pd.DataFrame, output_path: str, filename: str = "port_mapping.xlsx"
+    df: pd.DataFrame,
+    output_path: str | PathLike[str],
+    filename: str = "port_mapping.xlsx",
 ) -> None:
     """Save the port mapping to an Excel file."""
     output_dir = Path(output_path)
@@ -78,18 +101,21 @@ def save_to_excel(
     df.to_excel(output_dir / filename, index=False)
 
 
-def _extract_single_fabric_rows(graph: nx.Graph) -> list[dict[str, object]]:
+def _extract_rows_for_context(
+    context: PortMappingContext,
+    edges: list[tuple[str, str, dict[str, object]]],
+    cable_counter: int,
+) -> tuple[list[dict[str, object]], int]:
     rows: list[dict[str, object]] = []
-    cable_counter = 1
 
     sorted_edges = sorted(
-        graph.edges(data=True),
-        key=lambda edge: _edge_sort_key(graph, edge[0], edge[1]),
+        edges,
+        key=lambda edge: _edge_sort_key(context, edge[0], edge[1]),
     )
 
     for source_node_id, target_node_id, attrs in sorted_edges:
         oriented = _orient_edge_allocation(
-            graph,
+            context,
             source_node_id,
             target_node_id,
             attrs,
@@ -112,46 +138,82 @@ def _extract_single_fabric_rows(graph: nx.Graph) -> list[dict[str, object]]:
         for source_port, target_port in zip(source_ports, target_ports):
             rows.append(
                 {
+                    **(
+                        {"fabric": context.fabric_name}
+                        if context.fabric_name is not None
+                        else {}
+                    ),
                     "source_serial_number": None,
-                    "source_group": _node_group_label(graph, source_node_id),
+                    "source_group": _node_group_label(context, source_node_id),
                     "source_node_id": source_node_id,
                     "source_node_port": source_port,
                     "source_lane_units": source_lane_units,
                     "target_node_port": target_port,
                     "target_lane_units": target_lane_units,
                     "target_node_id": target_node_id,
-                    "target_group": _node_group_label(graph, target_node_id),
+                    "target_group": _node_group_label(context, target_node_id),
                     "target_serial_number": None,
-                    "cable_bandwidth_gb": attrs.get("cable_bandwidth_gb"),
+                    "cable_bandwidth_gb": cable_bandwidth_gb(cast(EdgeAttrs, attrs)),
                     "cable_number": cable_counter,
                 }
             )
             cable_counter += 1
 
-    return rows
+    return rows, cable_counter
+
+
+def _build_port_mapping_context(
+    graph: nx.Graph,
+    fabric_name: str | None = None,
+) -> PortMappingContext:
+    node_attrs_by_id = {
+        node_id: attrs
+        for node_id, raw_attrs in graph.nodes(data=True)
+        if (attrs := flatten_node_attrs_for_fabric(raw_attrs, fabric_name)) is not None
+    }
+    natural_sort_keys = {node_id: natural_sort_key(node_id) for node_id in node_attrs_by_id}
+    node_sort_keys = {
+        node_id: node_sort_key(
+            node_id,
+            node_attrs_by_id[node_id],
+            natural_sort_keys[node_id],
+        )
+        for node_id in node_attrs_by_id
+    }
+    return PortMappingContext(
+        fabric_name=fabric_name,
+        node_attrs_by_id=node_attrs_by_id,
+        node_sort_keys=node_sort_keys,
+    )
 
 
 def _edge_sort_key(
-    graph: nx.Graph,
+    context: PortMappingContext,
     source: str,
     target: str,
 ) -> tuple[tuple[object, ...], tuple[object, ...]]:
     lower_node, upper_node = sorted(
         (source, target),
-        key=lambda node: _node_sort_key(graph, node),
+        key=context.node_sort_keys.__getitem__,
     )
     return (
-        _node_sort_key(graph, lower_node),
-        _node_sort_key(graph, upper_node),
+        context.node_sort_keys[lower_node],
+        context.node_sort_keys[upper_node],
     )
 
 
-def _should_swap_edge_orientation(graph: nx.Graph, source: str, target: str) -> bool:
-    return graph.nodes[source]["layer_index"] > graph.nodes[target]["layer_index"]
+def _should_swap_edge_orientation(
+    context: PortMappingContext,
+    source: str,
+    target: str,
+) -> bool:
+    return _node_attrs(context, source)["layer_index"] > _node_attrs(context, target)[
+        "layer_index"
+    ]
 
 
 def _orient_edge_allocation(
-    graph: nx.Graph,
+    context: PortMappingContext,
     source: str,
     target: str,
     attrs: dict[str, object],
@@ -161,7 +223,7 @@ def _orient_edge_allocation(
     source_lane_units = _require_int(attrs, "source_lane_units_per_cable")
     target_lane_units = _require_int(attrs, "target_lane_units_per_cable")
 
-    if _should_swap_edge_orientation(graph, source, target):
+    if _should_swap_edge_orientation(context, source, target):
         return {
             "source_node_id": target,
             "target_node_id": source,
@@ -200,21 +262,12 @@ def _validate_edge_allocation(
         )
 
 
-def _node_group_label(graph: nx.Graph, node_id: str) -> str:
-    return str(graph.nodes[node_id].get("group_label") or "global")
+def _node_attrs(context: PortMappingContext, node_id: str) -> NodeAttrs:
+    return context.node_attrs_by_id[node_id]
 
 
-def _node_sort_key(graph: nx.Graph, node_id: str) -> tuple[object, ...]:
-    attrs = graph.nodes[node_id]
-    group_order = attrs.get("group_order")
-    node_ordinal = attrs.get("node_ordinal", 0)
-    return (
-        attrs["layer_index"],
-        1 if group_order is None else 0,
-        group_order or 0,
-        node_ordinal,
-        _natural_sort_key(node_id),
-    )
+def _node_group_label(context: PortMappingContext, node_id: str) -> str:
+    return node_group_label(_node_attrs(context, node_id))
 
 
 def _require_int_list(attrs: dict[str, object], key: str) -> list[int]:
@@ -229,8 +282,3 @@ def _require_int(attrs: dict[str, object], key: str) -> int:
     if not isinstance(value, int):
         raise ValueError(f"Edge attribute {key!r} must be an integer.")
     return value
-
-
-def _natural_sort_key(value: str) -> tuple[object, ...]:
-    parts = re.split(r"(\d+)", value)
-    return tuple(int(part) if part.isdigit() else part for part in parts)

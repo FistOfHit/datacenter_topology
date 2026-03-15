@@ -1,116 +1,169 @@
 # Architecture Overview
 
+This document describes the current system structure and the stable design
+choices behind the topology generation pipeline.
+
 ## Execution Flow
 
-The application remains a single CLI pipeline:
+The application runs as one CLI pipeline:
 
-1. Parse arguments.
-2. Create the output directory and configure logging.
-3. Load and validate YAML into `TopologyConfig`.
-4. Normalize either single-fabric config or multi-fabric shared-endpoint config into effective per-fabric topologies.
-5. Expand grouped layers into concrete nodes and concrete link bundles.
-6. Validate the expanded topology per node.
-7. Build a `networkx.Graph`.
+1. Parse CLI arguments in `argparser.py`.
+2. Resolve the final output directory path in `file_handler.py`.
+3. Create the output directory and configure logging in `logger.py`.
+4. Load YAML and validate it into `TopologyConfig`.
+5. Expand grouped intent into concrete nodes and concrete link bundles.
+6. Validate the expanded topology against lane-unit capacity and supported port
+   modes.
+7. Build a `networkx.Graph` with node and edge metadata.
 8. Render `topology.png` or per-fabric `topology_<fabric>.png`.
 9. Flatten graph edges into `port_mapping.xlsx`.
 
+Important execution details:
+
+- `parse_args()` is pure and only parses arguments.
+- Output directory resolution happens before logging, but directory creation
+  happens when logging/output writers need it.
+- The CLI contract and output filenames are intentionally stable.
+
 ## Core Modules
 
-### `config_schema.py`
+### Config pipeline
 
-Defines the grouped config model.
+The config pipeline is split across:
 
-- `GroupConfig`
-- `GroupingConfig`
-- `PortModeConfig`
-- `PortLayoutConfig`
-- `LayerConfig`
-- `LinkConfig`
-- `FabricConfig`
-- `GpuNodesConfig`
-- `TopologyConfig`
+- `config_identifiers.py`
+- `config_types.py`
+- `config_parser.py`
+- `config_validation.py`
 
-Semantic validation enforces:
+Together these modules define the immutable configuration model, parse YAML
+input, normalize identifiers, and enforce semantic validation.
 
-- one repeated group at most
-- unique literal and normalized group, grouping, layer, and fabric names
-- valid placements
-- adjacent-layer-only links
-- policy/placement compatibility
-- valid lane-based port layouts
-- link bandwidth support against endpoint port modes
-- exact correspondence between `gpu_nodes.fabric_port_layouts` and `fabrics`
-- a clean nesting chain across `groupings`
-- `gpu_nodes` as the only shared layer in multi-fabric mode
+Key guarantees:
+
+- single-fabric and multi-fabric config shapes are mutually exclusive
+- layer, group, grouping, and fabric names stay unique after normalization
+- links are limited to adjacent layers in declared order
+- link policies must match endpoint placement semantics
+- lane-based port math must be valid on every layer
+- `gpu_nodes` is the only shared layer in multi-fabric mode
 
 ### `expander.py`
 
-Turns the validated grouped config into concrete intent:
+Expansion converts validated grouped config into concrete topology intent:
 
-- expands group instances
-- expands concrete nodes
-- expands concrete link bundles
-- resolves the selected grouping for each fabric
-- duplicates shared `gpu_nodes` intent per fabric for validation while retaining a shared physical graph node ID
-- resolves per-end lane consumption for each cable bandwidth
+- concrete nodes
+- concrete full-mesh link bundles
+- resolved group labels for grouped layers
+- per-end lane consumption for each cable bandwidth
 
-This module does not mutate a graph. It is a pure expansion stage that makes later validation and testing straightforward.
+Expansion is intentionally graph-free. It produces a deterministic intermediate
+representation that later stages can validate and materialize.
 
 ### `validator.py`
 
-Validates the expanded topology:
+Validation runs on the expanded topology, not the raw YAML shape.
 
-- computes required lane units per node
-- computes per-node up/down bandwidth usage
-- verifies that each node supports the requested cable bandwidth
-- checks that aggregate lane consumption fits the hardware budget
+It checks:
 
-For multi-fabric runs, validation remains fabric-local even on shared `gpu_nodes`.
+- per-node lane-unit demand
+- per-node aggregate up/down bandwidth
+- supported cable bandwidth on each endpoint
+- aggregate lane demand against hardware capacity
 
-All validation is performed against the expanded node IDs that will appear in the graph and cut-sheet.
+In multi-fabric mode, validation remains fabric-local even for shared
+`gpu_nodes`.
 
 ### `topology_generator.py`
 
-Orchestrates grouped topology generation:
+This module turns expanded, validated intent into the final graph.
 
-- validates the config
-- expands it
-- validates expanded intent
-- creates graph nodes and graph edges
-- assigns deterministic contiguous base-lane spans per cable
-- stores lane-based usage metadata on nodes and edges
-- keeps one giant graph for all fabrics while storing per-fabric grouping-aware metrics on shared `gpu_nodes`
-- exposes helpers to derive a flattened per-fabric graph view for downstream consumers
+It is responsible for:
 
-### `visualiser.py`
+- expansion and expanded-topology validation orchestration
+- graph node creation
+- graph edge creation
+- deterministic contiguous lane allocation per cable
+- storing usage metadata on nodes and allocation metadata on edges
+- merging multi-fabric runs into one graph while preserving per-fabric views
 
-Responsible for grouped condensed rendering.
+### Render pipeline
 
-- renders first and last visible groups when many groups exist
-- renders first and last visible nodes inside a rendered group/layer when many nodes exist
-- keeps global layers separate from grouped local layers
-- draws aggregate bandwidth indicators and fanout annotations from the actual graph
-- shows lane consumption per node rather than a single-speed port-equivalent metric
-- renders each multi-fabric graph through an isolated per-fabric view
+Rendering is split across:
+
+- `render_environment.py`
+- `render_formatting.py`
+- `render_types.py`
+- `render_layout.py`
+- `render_drawing.py`
+- `rendering.py`
+
+The render pipeline keeps layout computation, drawing primitives, environment
+setup, and formatting logic separate.
+
+Stable rendering behavior:
+
+- large grouped layers are rendered in condensed form
+- only the first and last visible groups/nodes are shown when counts are large
+- global layers are kept visually separate from grouped layers
+- aggregate bandwidth and fanout annotations come from graph metadata
+- multi-fabric runs are rendered through isolated per-fabric graph views
+
+### `graph_metadata.py`
+
+This module centralizes typed access to graph, node, and edge metadata used by
+rendering and export code.
+
+Its role is to reduce scattered string-key dict handling and provide a clearer
+internal contract around graph attributes.
 
 ### `port_mapper.py`
 
-Responsible for the Excel cut-sheet data.
+This module converts graph edges into the Excel cut-sheet.
 
-- converts graph edges into one row per cable
-- includes explicit source and target group columns
-- includes per-end base-lane start indices and lane widths
-- normalizes source/target orientation to lower layer -> higher layer
-- merges per-fabric tables into one workbook in multi-fabric mode and adds a `fabric` column
-- writes `port_mapping.xlsx`
+Stable export behavior:
 
-## Design Notes
+- one row per physical cable
+- lower-layer to upper-layer orientation
+- explicit source and target group columns
+- per-end base-lane start indices and lane widths
+- merged multi-fabric workbook with a `fabric` column
 
-- The grouped model is explicit. There is no hidden derivation of pod counts or placement scopes.
-- Multi-fabric mode always shares only layer 0, exposed in YAML as `gpu_nodes`.
-- Multi-fabric group membership is defined centrally in `groupings`; each fabric selects one grouping namespace and uses `placement: group` for grouping-relative layers.
-- Links remain adjacent-layer only within each fabric's effective layer order.
-- Validation is performed after expansion so grouped fabrics and shared `gpu_nodes` are checked against the actual intended link set.
-- Shared endpoint graph node IDs stay grouping-neutral so multiple fabrics can view the same physical endpoints through different groupings without collisions.
-- Port hardware is modeled in lane units so a single switch can expose multiple logical port speeds, such as `128 x 400G` or `64 x 800G`, without duplicating the layer.
-- The renderer is deliberately condensed; it is a planning view rather than a physical layout drawing.
+## Design Choices
+
+### Expand first, validate concrete intent, then build the graph
+
+The code validates the topology against the concrete node/link set that will
+actually be built, rather than validating only the abstract YAML shape. This
+keeps grouped and multi-fabric behavior easier to reason about and test.
+
+### Links exist only between adjacent layers
+
+The ordered `layers` list defines topology order. Links are modeled only
+between neighboring layers, and the link policy defines the full adjacency
+pattern between those two layers.
+
+### Multi-fabric mode shares only `gpu_nodes`
+
+Multi-fabric mode uses one shared layer-0 endpoint population, exposed in YAML
+as `gpu_nodes`. Each fabric selects one grouping namespace and builds an
+otherwise isolated topology above that shared endpoint layer.
+
+### Shared endpoints remain physically shared but logically fabric-local
+
+During expansion and validation, shared GPU nodes are duplicated per fabric so
+capacity checks remain isolated. During graph materialization, those fabrics map
+back onto shared physical graph node IDs so downstream consumers can still view
+one combined topology.
+
+### Lane units are the hardware budget
+
+Port hardware is modeled in base lane units instead of fixed “ports per node”.
+That allows mixed-speed port modes on the same device while still enforcing one
+underlying hardware budget.
+
+### The renderer is a planning view, not a physical layout
+
+The rendered diagram is intentionally condensed and annotation-heavy. It is
+designed to communicate topology shape, bandwidth, and cable fanout without
+trying to draw every node literally at large scales.

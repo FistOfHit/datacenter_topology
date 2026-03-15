@@ -1,20 +1,16 @@
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib.image as mpimg
 import networkx as nx
 
-import topology_generator.visualiser as visualiser
+import topology_generator.render_environment as render_environment
 from topology_generator.topology_generator import generate_topology
-from topology_generator.visualiser import (
+from topology_generator.render_drawing import get_fanout_annotation
+from topology_generator.render_environment import ensure_matplotlib_environment
+from topology_generator.render_formatting import (
     LINK_COLOR_PALETTE,
-    build_layout_profile,
-    calculate_layout,
-    calculate_plot_limits,
-    compute_group_bandwidth_arrow_x,
-    compute_annotation_columns,
-    compute_group_lane_layout,
-    compute_node_box_geometry,
-    ensure_matplotlib_environment,
     format_bandwidth,
     format_fanout_label,
     format_group_label,
@@ -22,12 +18,23 @@ from topology_generator.visualiser import (
     format_hidden_node_label,
     format_node_name,
     get_bandwidth_colors,
-    get_fanout_annotation,
+)
+from topology_generator.render_layout import (
+    build_layout_profile,
+    build_render_summary,
+    calculate_group_layer_bandwidth,
+    calculate_layout,
+    calculate_layer_bandwidth,
+    calculate_plot_limits,
+    compute_annotation_columns,
+    compute_group_bandwidth_arrow_x,
+    compute_group_lane_layout,
+    compute_node_box_geometry,
     get_group_centers,
     get_leftmost_visible_nodes_by_layer,
     select_visible_group_indices,
-    visualize_topology,
 )
+from topology_generator.rendering import visualize_topology
 
 
 def test_format_bandwidth():
@@ -148,6 +155,53 @@ def test_get_bandwidth_colors_is_deterministic():
         400: "black",
         800: LINK_COLOR_PALETTE[0],
     }
+
+
+def test_calculate_layer_bandwidth_sums_all_links_between_adjacent_layers():
+    graph = nx.Graph()
+    graph.add_node("pod_1_compute_1", layer_index=0)
+    graph.add_node("pod_1_compute_2", layer_index=0)
+    graph.add_node("pod_1_leaf_1", layer_index=1)
+    graph.add_node("spine_1", layer_index=2)
+    graph.add_edge("pod_1_compute_1", "pod_1_leaf_1", num_cables=2, cable_bandwidth_gb=400)
+    graph.add_edge("pod_1_compute_2", "pod_1_leaf_1", num_cables=1, cable_bandwidth_gb=400)
+    graph.add_edge("pod_1_leaf_1", "spine_1", num_cables=1, cable_bandwidth_gb=800)
+
+    assert (
+        calculate_layer_bandwidth(
+            graph,
+            ["pod_1_compute_1", "pod_1_compute_2"],
+            ["pod_1_leaf_1"],
+        )
+        == 1200
+    )
+
+
+def test_calculate_layer_bandwidth_respects_requested_node_subsets():
+    graph = nx.Graph()
+    graph.add_node("compute_1", layer_index=0)
+    graph.add_node("compute_2", layer_index=0)
+    graph.add_node("leaf_1", layer_index=1)
+    graph.add_node("leaf_2", layer_index=1)
+    graph.add_edge("compute_1", "leaf_1", num_cables=1, cable_bandwidth_gb=100)
+    graph.add_edge("compute_2", "leaf_2", num_cables=1, cable_bandwidth_gb=200)
+
+    assert calculate_layer_bandwidth(graph, ["compute_1"], ["leaf_1"]) == 100
+
+
+def test_calculate_group_layer_bandwidth_counts_only_matching_group_pairs():
+    graph = nx.Graph()
+    graph.add_node("pod_1_leaf_1", layer_index=1, group_index=1)
+    graph.add_node("pod_1_spine_1", layer_index=2, group_index=1)
+    graph.add_node("pod_2_leaf_1", layer_index=1, group_index=2)
+    graph.add_node("pod_2_spine_1", layer_index=2, group_index=2)
+    graph.add_node("core_1", layer_index=2, group_index=None)
+    graph.add_edge("pod_1_leaf_1", "pod_1_spine_1", num_cables=2, cable_bandwidth_gb=800)
+    graph.add_edge("pod_2_leaf_1", "pod_2_spine_1", num_cables=1, cable_bandwidth_gb=800)
+    graph.add_edge("pod_1_leaf_1", "core_1", num_cables=1, cable_bandwidth_gb=800)
+
+    assert calculate_group_layer_bandwidth(graph, 1, 2, 1) == 1600
+    assert calculate_group_layer_bandwidth(graph, 1, 2, 2) == 800
 
 
 def test_two_pod_layout_uses_tighter_middle_gap(two_pod_dense_config):
@@ -294,15 +348,74 @@ def test_ensure_matplotlib_environment_sets_safe_fallbacks(tmp_path, monkeypatch
     monkeypatch.delenv("MPLBACKEND", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setattr(visualiser, "_directory_is_writable", lambda path: False)
-    monkeypatch.setattr(visualiser.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(render_environment, "_directory_is_writable", lambda path: False)
+    monkeypatch.setattr(render_environment.tempfile, "gettempdir", lambda: str(tmp_path))
 
     ensure_matplotlib_environment()
 
-    assert visualiser.os.environ["MPLCONFIGDIR"] == str(
+    assert render_environment.os.environ["MPLCONFIGDIR"] == str(
         tmp_path / "topology_generator_matplotlib"
     )
-    assert visualiser.os.environ["MPLBACKEND"] == "Agg"
+    assert render_environment.os.environ["MPLBACKEND"] == "Agg"
+
+
+def test_render_environment_import_has_no_side_effects(monkeypatch):
+    monkeypatch.delenv("MPLCONFIGDIR", raising=False)
+    monkeypatch.delenv("MPLBACKEND", raising=False)
+
+    importlib.reload(render_environment)
+
+    assert "MPLCONFIGDIR" not in render_environment.os.environ
+    assert "MPLBACKEND" not in render_environment.os.environ
+
+
+def test_load_matplotlib_is_lazy_and_cached(monkeypatch):
+    calls: list[str] = []
+
+    def fake_import_module(name: str):
+        calls.append(name)
+        if name == "matplotlib.pyplot":
+            return "plt-module"
+        if name == "matplotlib.lines":
+            return SimpleNamespace(Line2D="line2d")
+        if name == "matplotlib.patches":
+            return SimpleNamespace(Patch="patch", Arc="arc", Rectangle="rectangle")
+        raise AssertionError(f"Unexpected import: {name}")
+
+    render_environment.load_matplotlib.cache_clear()
+    monkeypatch.setattr(
+        render_environment,
+        "ensure_matplotlib_environment",
+        lambda: calls.append("ensure"),
+    )
+    monkeypatch.setattr(
+        render_environment.importlib,
+        "import_module",
+        fake_import_module,
+    )
+
+    first = render_environment.load_matplotlib()
+    second = render_environment.load_matplotlib()
+
+    assert calls == [
+        "ensure",
+        "matplotlib.pyplot",
+        "matplotlib.lines",
+        "matplotlib.patches",
+    ]
+    assert first is second
+    assert first.plt == "plt-module"
+    assert first.Line2D == "line2d"
+    assert first.Patch == "patch"
+    assert first.Arc == "arc"
+    assert first.Rectangle == "rectangle"
+
+
+def test_build_render_summary_tracks_layer_and_group_bandwidth(two_pod_dense_config):
+    summary = build_render_summary(generate_topology(two_pod_dense_config))
+
+    assert summary.layer_bandwidths[(0, 1)] > 0
+    assert summary.group_layer_bandwidths[(1, 0, 1)] > 0
 
 
 def test_visualize_topology_writes_per_fabric_outputs(tmp_path, multi_fabric_config):
@@ -315,14 +428,14 @@ def test_visualize_topology_writes_per_fabric_outputs(tmp_path, multi_fabric_con
 
 def test_visualize_topology_normalizes_fabric_name_in_output_filename(tmp_path):
     config = {
-        "groups": [
+        "groupings": [
             {
                 "name": "pod",
-                "count": 1,
+                "members_per_group": 1,
             }
         ],
         "gpu_nodes": {
-            "nodes_per_group": 1,
+            "total_nodes": 1,
             "fabric_port_layouts": {
                 "front/end": {
                     "base_lane_bandwidth_gb": 100,
@@ -339,10 +452,11 @@ def test_visualize_topology_normalizes_fabric_name_in_output_filename(tmp_path):
         "fabrics": [
             {
                 "name": "front/end",
+                "grouping": "pod",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "pod",
+                        "placement": "group",
                         "nodes_per_group": 1,
                         "port_layout": {
                             "base_lane_bandwidth_gb": 100,

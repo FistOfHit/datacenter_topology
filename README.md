@@ -1,22 +1,47 @@
 # Datacenter Topology Generator
 
-Generate grouped datacenter network topologies from YAML, render condensed topology diagrams, and export a per-cable Excel cut-sheet.
+Generate datacenter network topologies from YAML, render condensed topology
+diagrams, and export a per-cable Excel cut-sheet.
 
-Single-fabric runs produce:
+The tool takes a topology config as input and produces:
+
+- a topology diagram
+- an Excel port mapping
+- a run log
+
+Single-fabric runs write:
 
 - `topology.png`
 - `port_mapping.xlsx`
 - `network_topology.log`
 
-Multi-fabric runs still produce one `port_mapping.xlsx` and one `network_topology.log`, but emit one diagram per fabric such as `topology_backend.png`.
+Multi-fabric runs still write one `port_mapping.xlsx` and one
+`network_topology.log`, but emit one diagram per fabric such as
+`topology_backend.png`.
 
-The CLI entrypoints are:
+## CLI
+
+The supported entrypoints are:
 
 ```bash
 python -m topology_generator.main --config <config_path> --output-dir <output_dir>
 python -m topology_generator --config <config_path> --output-dir <output_dir>
 topology-generator --config <config_path> --output-dir <output_dir>
 ```
+
+Add `--timestamp` to place the outputs in a timestamped subdirectory under the
+given output directory.
+
+## High-Level Model
+
+The config defines an ordered list of layers and explicit links between adjacent
+layers.
+
+- Single-fabric mode uses `groups`, `layers`, and `links`.
+- Multi-fabric mode shares one `gpu_nodes` layer across multiple isolated
+  fabrics via `groupings`, `gpu_nodes`, and `fabrics`.
+- Port capacity is modeled in lane units, so one device can legally expose more
+  than one port speed from the same hardware budget.
 
 ## Quick Start
 
@@ -39,163 +64,63 @@ make install-dev
 pre-commit install
 ```
 
-### Run
+### Run A Small Single-Fabric Example
 
 ```bash
-python -m topology_generator.main --config configs/examples/two_tier_small.yaml --output-dir output
+python -m topology_generator.main \
+  --config configs/examples/two_tier_small.yaml \
+  --output-dir output/two_tier_small
 ```
 
-Add `--timestamp` to create a timestamped output directory:
+### Run A Small Multi-Fabric Example
 
 ```bash
-python -m topology_generator.main --config configs/examples/two_tier_small.yaml --output-dir output --timestamp
+python -m topology_generator.main \
+  --config configs/examples/multi_fabric_small.yaml \
+  --output-dir output/multi_fabric_small
 ```
+
+For the full set of shipped examples and their expected outputs, see
+[Worked Examples](docs/examples.md).
 
 ## Configuration
 
-The YAML stays intentionally simple.
+The YAML stays intentionally explicit.
 
-Single-fabric mode uses:
-
-- `groups`: optional repeated scopes such as `pod`
-- `layers`: ordered tiers and per-node port capacity
-- `links`: explicit connectivity between adjacent layers
-
-Example:
+Single-fabric configs look like:
 
 ```yaml
 groups:
-  - name: pod
-    count: 2
-
+  - ...
 layers:
-  - name: compute
-    placement: pod
-    nodes_per_group: 32
-    port_layout:
-      base_lane_bandwidth_gb: 400
-      total_lane_units: 8
-      supported_port_modes:
-        - port_bandwidth_gb: 400
-          lane_units: 1
-
-  - name: leaf
-    placement: pod
-    nodes_per_group: 8
-    port_layout:
-      base_lane_bandwidth_gb: 400
-      total_lane_units: 128
-      supported_port_modes:
-        - port_bandwidth_gb: 400
-          lane_units: 1
-        - port_bandwidth_gb: 800
-          lane_units: 2
-
+  - ...
 links:
-  - from: compute
-    to: leaf
-    policy: within_group_full_mesh
-    cables_per_pair: 1
-    cable_bandwidth_gb: 400
+  - ...
 ```
 
-For the full config reference, validation rules, and examples:
-
-- [Configuration Reference](docs/configuration.md)
-- [Worked Examples](docs/examples.md)
-
-Multi-fabric mode shares a single `gpu_nodes` layer across several isolated fabrics.
-Shared endpoint partitions live in one top-level `groupings` section, and each
-fabric selects which grouping it operates in:
+Multi-fabric configs look like:
 
 ```yaml
 groupings:
-  - name: pod
-    members_per_group: 2
-  - name: rack
-    members_per_group: 1
-
+  - ...
 gpu_nodes:
-  total_nodes: 2
+  total_nodes: ...
   fabric_port_layouts:
-    backend:
-      base_lane_bandwidth_gb: 100
-      total_lane_units: 1
-      supported_port_modes:
-        - port_bandwidth_gb: 100
-          lane_units: 1
-    frontend:
-      base_lane_bandwidth_gb: 50
-      total_lane_units: 1
-      supported_port_modes:
-        - port_bandwidth_gb: 50
-          lane_units: 1
-
+    backend: ...
 fabrics:
-  - name: backend
-    grouping: pod
-    layers:
-      - name: leaf
-        placement: group
-        nodes_per_group: 1
-        port_layout: ...
-    links:
-      - from: gpu_nodes
-        to: leaf
-        policy: within_group_full_mesh
-        cables_per_pair: 1
-        cable_bandwidth_gb: 100
-
-  - name: frontend
-    grouping: pod
-    layers:
-      - name: tor
-        placement: group
-        nodes_per_group: 1
-        port_layout: ...
-    links:
-      - from: gpu_nodes
-        to: tor
-        policy: within_group_full_mesh
-        cables_per_pair: 1
-        cable_bandwidth_gb: 50
-
-  - name: oob
-    grouping: rack
-    layers:
-      - name: mgmt
-        placement: global
-        nodes_per_group: 1
-        port_layout: ...
-    links:
-      - from: gpu_nodes
-        to: mgmt
-        policy: group_to_global_full_mesh
-        cables_per_pair: 1
-        cable_bandwidth_gb: 25
+  - ...
 ```
 
-See [`configs/examples/multi_fabric_small.yaml`](configs/examples/multi_fabric_small.yaml) for a minimal complete example with `backend`, `frontend`, and `oob`.
-See [`configs/examples/multi_fabric_backend_frontend.yaml`](configs/examples/multi_fabric_backend_frontend.yaml) for a larger two-fabric example built from the sixteen-pod three-tier backend plus a separate frontend fabric.
-See [`configs/examples/multi_fabric_backend_frontend_oob.yaml`](configs/examples/multi_fabric_backend_frontend_oob.yaml) for the same large shared endpoint population plus a third `OOB` fabric that uses `rack = 8` grouping and 1G management links.
+Use [Configuration Reference](docs/configuration.md) for the canonical schema
+and validation rules.
 
-## Development
+## Where To Go Next
 
-Helpful commands:
-
-```bash
-./.venv/bin/python -m pytest -q
-./.venv/bin/python -m ruff check .
-./.venv/bin/python -m mypy
-python -m topology_generator.main --config configs/examples/three_tier_small.yaml --output-dir output/example
-```
-
-Developer-oriented detail lives in:
-
-- [Architecture Overview](docs/architecture.md)
-- [Configuration Reference](docs/configuration.md)
-- [Worked Examples](docs/examples.md)
-- [Agent Guide](AGENTS.md)
+- [Configuration Reference](docs/configuration.md): canonical config contract
+- [Architecture Overview](docs/architecture.md): how the pipeline is structured
+- [Worked Examples](docs/examples.md): shipped example configs and expected results
+- [Contributing](CONTRIBUTING.md): developer workflow, validation, and profiling
+- [Agent Guide](AGENTS.md): repo-specific guidance for coding agents
 
 ## License
 

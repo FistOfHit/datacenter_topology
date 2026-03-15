@@ -1,44 +1,34 @@
 import logging
-import os
 from datetime import datetime
+from os import PathLike
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from topology_generator.config_schema import TopologyConfig
+from topology_generator.config_types import InvalidTopologyConfig, TopologyConfig
 
 logger = logging.getLogger(__name__)
 
 
-def get_timestamped_dir(base_dir: str) -> str:
-    """
-    Create and return a timestamped subdirectory within the base directory.
+def resolve_output_dir(base_dir: str | PathLike[str], timestamp: bool) -> Path:
+    """Resolve the final output directory path without creating it."""
+    output_path = Path(base_dir)
+    if not timestamp:
+        return output_path
 
-    Args:
-        base_dir: The base directory to create the timestamped subdirectory in.
-
-    Returns:
-        The path to the timestamped subdirectory.
-    """
-    # Create timestamp string in format: YYYYMMDD_HHMMSS
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(base_dir, timestamp)
-
-    # Create directory if it doesn't exist
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    return output_dir
+    timestamp_dir = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return output_path / timestamp_dir
 
 
-def ensure_output_dir(output_dir: str) -> Path:
+def ensure_output_dir(output_dir: str | PathLike[str]) -> Path:
     """Create the output directory if needed and return it as a path."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     return output_path
 
 
-def load_config_from_file(config_path: str) -> TopologyConfig:
+def load_config_from_file(config_path: str | PathLike[str]) -> TopologyConfig:
     """
     Load and validate configuration from a YAML file.
 
@@ -52,13 +42,25 @@ def load_config_from_file(config_path: str) -> TopologyConfig:
         FileNotFoundError: If the configuration file doesn't exist.
         yaml.YAMLError: If the YAML file has invalid syntax.
     """
+    config_file = Path(config_path)
     try:
-        with Path(config_path).open("r", encoding="utf-8") as f:
+        with config_file.open("r", encoding="utf-8") as f:
             raw_config: Any = yaml.safe_load(f)
             return TopologyConfig.from_mapping(raw_config)
     except FileNotFoundError:
-        logger.error("Configuration file not found: %s", config_path)
+        logger.error("Configuration file not found: %s", config_file)
         raise
-    except yaml.YAMLError as e:
-        logger.error("Invalid YAML in configuration file: %s", str(e))
+    except yaml.YAMLError as exc:
+        logger.error(
+            "Invalid YAML in configuration file %s: %s",
+            config_file,
+            str(exc),
+        )
+        raise
+    except InvalidTopologyConfig as exc:
+        logger.error(
+            "Invalid topology configuration in %s: %s",
+            config_file,
+            str(exc),
+        )
         raise

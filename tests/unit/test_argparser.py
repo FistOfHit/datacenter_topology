@@ -4,46 +4,43 @@ from topology_generator.argparser import parse_args
 
 
 def test_parse_args_defaults():
-    """
-    Test the default values when no arguments are provided.
-
-    Verifies that default config path and output directory are set correctly.
-    """
     with patch("sys.argv", ["main.py"]):
-        with patch(
-            "topology_generator.argparser.get_timestamped_dir", return_value="output"
-        ):
-            args = parse_args()
-            assert args.config == "configs/examples/two_tier_small.yaml"
-            assert args.output_dir == "output"
+        args = parse_args()
+
+    assert args.config == "configs/examples/two_tier_small.yaml"
+    assert args.output_dir == "output"
+    assert args.timestamp is False
 
 
 def test_parse_args_custom():
-    """
-    Test with custom command line arguments.
-
-    Verifies that custom config path and output directory are properly parsed.
-    """
     with patch(
         "sys.argv",
         ["main.py", "--config", "custom_config.yaml", "--output-dir", "custom_output"],
     ):
-        with patch(
-            "topology_generator.argparser.get_timestamped_dir",
-            return_value="custom_output_test_dir",
-        ):
-            args = parse_args()
-            assert args.config == "custom_config.yaml"
-            assert args.output_dir == "custom_output"
+        args = parse_args()
+
+    assert args.config == "custom_config.yaml"
+    assert args.output_dir == "custom_output"
+    assert args.timestamp is False
 
 
 def test_parse_args_applies_timestamp():
     with patch("sys.argv", ["main.py", "--timestamp", "--output-dir", "base_output"]):
-        with patch(
-            "topology_generator.argparser.get_timestamped_dir",
-            return_value="base_output/20260313_120000",
-        ) as mock_get_timestamped_dir:
-            args = parse_args()
+        args = parse_args()
 
-    mock_get_timestamped_dir.assert_called_once_with("base_output")
-    assert args.output_dir == "base_output/20260313_120000"
+    assert args.output_dir == "base_output"
+    assert args.timestamp is True
+
+
+def test_parse_args_has_no_filesystem_side_effects(tmp_path):
+    output_dir = tmp_path / "timestamped_output"
+
+    with patch(
+        "sys.argv",
+        ["main.py", "--timestamp", "--output-dir", str(output_dir)],
+    ):
+        args = parse_args()
+
+    assert args.output_dir == str(output_dir)
+    assert args.timestamp is True
+    assert not output_dir.exists()

@@ -1,15 +1,22 @@
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import networkx as nx
 
-from topology_generator.config_schema import (
+from topology_generator.config_identifiers import normalize_identifier
+from topology_generator.config_types import (
     TopologyConfig,
     ensure_topology_config,
-    normalize_identifier,
 )
 from topology_generator.expander import ExpandedNode, ExpandedTopology, expand_topology
+from topology_generator.graph_metadata import (
+    fabric_name_for_edge,
+    fabric_names,
+    flatten_node_attrs_for_fabric,
+    graph_attrs,
+    is_multi_fabric_graph as _is_multi_fabric_graph,
+)
 from topology_generator.validator import NodeUsage, validate_expanded_topology
 
 logger = logging.getLogger(__name__)
@@ -19,24 +26,21 @@ class ContiguousLaneAllocator:
     """Allocate the lowest available contiguous lane span for each cable."""
 
     def __init__(self, total_lane_units: int):
-        self._occupied = [False] * total_lane_units
+        self._total_lane_units = total_lane_units
+        self._next_free_lane = 0
 
     def allocate(self, lane_units: int) -> int:
         if lane_units <= 0:
             raise ValueError("lane_units must be greater than zero.")
 
-        total_lane_units = len(self._occupied)
-        for start_index in range(total_lane_units - lane_units + 1):
-            if all(
-                not self._occupied[index]
-                for index in range(start_index, start_index + lane_units)
-            ):
-                for index in range(start_index, start_index + lane_units):
-                    self._occupied[index] = True
-                return start_index + 1
+        start_index = self._next_free_lane
+        end_index = start_index + lane_units
+        if end_index <= self._total_lane_units:
+            self._next_free_lane = end_index
+            return start_index + 1
         raise ValueError(
             f"Unable to allocate {lane_units} contiguous lane units from "
-            f"{total_lane_units} available units."
+            f"{self._total_lane_units} available units."
         )
 
 
@@ -49,25 +53,25 @@ def generate_topology(config: Mapping[str, object] | TopologyConfig) -> nx.Graph
     usage_by_node = validate_expanded_topology(expanded_topology)
 
     graph = nx.Graph()
-    graph.graph["is_multi_fabric"] = topology_config.is_multi_fabric
-    graph.graph["fabric_names"] = topology_config.fabric_names
+    metadata = graph_attrs(graph)
+    metadata["is_multi_fabric"] = topology_config.is_multi_fabric
+    metadata["fabric_names"] = topology_config.fabric_names
     _add_expanded_nodes(graph, expanded_topology, usage_by_node)
     _add_expanded_links(graph, expanded_topology)
 
     logger.info("Network topology generation completed")
     return graph
 
+def get_fabric_names(graph: nx.Graph) -> tuple[str, ...]:
+    return fabric_names(graph)
+
 
 def is_multi_fabric_graph(graph: nx.Graph) -> bool:
-    return bool(graph.graph.get("is_multi_fabric"))
-
-
-def get_fabric_names(graph: nx.Graph) -> tuple[str, ...]:
-    return tuple(graph.graph.get("fabric_names", ()))
+    return _is_multi_fabric_graph(graph)
 
 
 def get_fabric_view(graph: nx.Graph, fabric_name: str) -> nx.Graph:
-    if not is_multi_fabric_graph(graph):
+    if not _is_multi_fabric_graph(graph):
         return graph.copy()
     known_fabrics = get_fabric_names(graph)
     if fabric_name not in known_fabrics:
@@ -77,30 +81,20 @@ def get_fabric_view(graph: nx.Graph, fabric_name: str) -> nx.Graph:
 
     fabric_view = nx.Graph()
     fabric_view.graph.update(graph.graph)
-    fabric_view.graph["is_multi_fabric"] = False
-    fabric_view.graph["fabric_names"] = ()
-    fabric_view.graph["fabric_name"] = fabric_name
+    fabric_metadata = graph_attrs(fabric_view)
+    fabric_metadata["is_multi_fabric"] = False
+    fabric_metadata["fabric_names"] = ()
+    fabric_metadata["fabric_name"] = fabric_name
 
-    for node_id, attrs in graph.nodes(data=True):
-        if attrs.get("is_shared_gpu_node"):
-            fabric_metrics = attrs.get("fabric_metrics", {})
-            if fabric_name not in fabric_metrics:
-                continue
-            flattened_attrs = {
-                key: value
-                for key, value in attrs.items()
-                if key != "fabric_metrics"
-            }
-            flattened_attrs.update(fabric_metrics[fabric_name])
-            flattened_attrs["fabric"] = fabric_name
-            fabric_view.add_node(node_id, **flattened_attrs)
+    for node_id, raw_attrs in graph.nodes(data=True):
+        flattened_attrs = flatten_node_attrs_for_fabric(raw_attrs, fabric_name)
+        if flattened_attrs is None:
             continue
-
-        if attrs.get("fabric") == fabric_name:
-            fabric_view.add_node(node_id, **attrs)
+        fabric_view.add_node(node_id, **flattened_attrs)
 
     for source, target, attrs in graph.edges(data=True):
-        if attrs.get("fabric") != fabric_name:
+        edge_metadata = cast(dict[str, object], attrs)
+        if fabric_name_for_edge(edge_metadata) != fabric_name:
             continue
         if source not in fabric_view or target not in fabric_view:
             continue

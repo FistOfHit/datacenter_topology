@@ -1,5 +1,6 @@
-from topology_generator.config_schema import TopologyConfig
+from topology_generator.config_types import TopologyConfig
 from topology_generator.topology_generator import (
+    ContiguousLaneAllocator,
     build_fabric_output_name,
     generate_topology,
     get_fabric_view,
@@ -123,3 +124,38 @@ def test_get_fabric_view_rejects_unknown_fabric(multi_fabric_config):
 
 def test_build_fabric_output_name_normalizes_for_filesystem():
     assert build_fabric_output_name("front/end") == "front_end"
+
+
+def test_contiguous_lane_allocator_uses_lowest_available_contiguous_spans():
+    allocator = ContiguousLaneAllocator(total_lane_units=8)
+
+    assert allocator.allocate(1) == 1
+    assert allocator.allocate(2) == 2
+    assert allocator.allocate(3) == 4
+    assert allocator.allocate(2) == 7
+
+
+def test_contiguous_lane_allocator_is_one_based_for_single_lane_allocations():
+    allocator = ContiguousLaneAllocator(total_lane_units=3)
+
+    assert allocator.allocate(1) == 1
+    assert allocator.allocate(1) == 2
+    assert allocator.allocate(1) == 3
+
+
+def test_contiguous_lane_allocator_rejects_exhausted_capacity():
+    allocator = ContiguousLaneAllocator(total_lane_units=4)
+
+    assert allocator.allocate(3) == 1
+
+    try:
+        allocator.allocate(2)
+    except ValueError as exc:
+        error = exc
+    else:
+        error = None
+
+    assert error is not None
+    assert "Unable to allocate 2 contiguous lane units from 4 available units." == str(
+        error
+    )

@@ -3,16 +3,18 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
-from topology_generator.config_schema import (
+from topology_generator.config_identifiers import (
     DEFAULT_SINGLE_FABRIC_NAME,
     GPU_NODES_LAYER_NAME,
-    LayerConfig,
-    PortLayoutConfig,
-    TopologyConfig,
     build_fabric_qualified_node_id,
     build_global_node_id,
     build_group_label_node_id,
     build_grouped_node_id,
+)
+from topology_generator.config_types import (
+    LayerConfig,
+    PortLayoutConfig,
+    TopologyConfig,
     ensure_topology_config,
 )
 

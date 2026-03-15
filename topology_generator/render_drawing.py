@@ -1,0 +1,555 @@
+from __future__ import annotations
+
+import logging
+import math
+from os import PathLike
+from pathlib import Path
+from typing import Any, Mapping, cast
+
+import networkx as nx
+
+from topology_generator.graph_metadata import FanoutAnnotation, cable_bandwidth_gb, cable_count, edge_attrs, node_attrs
+from topology_generator.render_environment import load_matplotlib
+from topology_generator.render_formatting import (
+    FANOUT_LABEL_FONT_SIZE,
+    NODE_METADATA_FONT_SIZE,
+    NODE_NAME_FONT_SIZE,
+    PORT_USAGE_LABEL_FONT_SIZE,
+    PORT_USAGE_VALUE_FONT_SIZE,
+    format_bandwidth,
+    format_fanout_label,
+    format_node_name,
+    get_bandwidth_colors,
+    get_layer_color,
+)
+from topology_generator.render_layout import (
+    build_figure_size,
+    build_render_summary,
+    calculate_plot_limits,
+    compute_group_bandwidth_arrow_x,
+    get_leftmost_visible_nodes_by_layer,
+    layer_bandwidth_from_summary,
+)
+from topology_generator.render_types import LayoutResult, NodeBoxGeometry, RenderSummary
+
+logger = logging.getLogger(__name__)
+
+
+def _mpl():
+    return load_matplotlib()
+
+
+def draw_arrow_symbol(
+    ax: Any,
+    arrow_size: float,
+    base_x: float,
+    base_y: float,
+    direction: str = "up",
+) -> None:
+    multiplier = 1 if direction == "up" else -1
+    ax.arrow(
+        base_x,
+        base_y,
+        0,
+        arrow_size * multiplier,
+        head_width=arrow_size * 0.8,
+        head_length=arrow_size * 0.45,
+        fc="black",
+        ec="black",
+        length_includes_head=True,
+        zorder=3,
+    )
+
+
+def add_bandwidth_indicators(
+    ax: Any,
+    pos: dict[str, tuple[float, float]],
+    node: str,
+    node_data: Mapping[str, Any],
+    geometry: NodeBoxGeometry,
+) -> None:
+    mpl = _mpl()
+    x, y = pos[node]
+    symbol_x = x + geometry.aggregate_x_offset
+    adjustment = geometry.half_height - 0.08
+
+    for direction, multiplier in {"up": 1, "down": -1}.items():
+        aggregate_bandwidth = node_data.get(f"aggregate_bandwidth_{direction}", 0)
+        if aggregate_bandwidth <= 0:
+            continue
+
+        symbol_y = y + adjustment * multiplier
+        draw_arrow_symbol(
+            ax,
+            geometry.aggregate_arrow_size,
+            symbol_x,
+            symbol_y - (geometry.aggregate_arrow_size / 2) * multiplier,
+            direction,
+        )
+        mpl.plt.text(
+            symbol_x - geometry.aggregate_text_offset,
+            symbol_y,
+            format_bandwidth(aggregate_bandwidth),
+            ha="right",
+            va="center",
+            fontsize=8,
+            zorder=3,
+        )
+
+
+def add_layer_bandwidth_arrow(
+    ax: Any,
+    y1: float,
+    y2: float,
+    bandwidth_gb: float,
+    x_pos: float,
+) -> None:
+    mpl = _mpl()
+    label_offset_x = 0.22
+    arrow_properties = dict(
+        head_width=0.1,
+        head_length=0.1,
+        fc="black",
+        ec="black",
+        length_includes_head=True,
+        zorder=2,
+    )
+
+    midpoint_y = (y1 + y2) / 2
+    arrow_length = 0.68
+    ax.arrow(x_pos, midpoint_y, 0, arrow_length, **arrow_properties)
+    ax.arrow(x_pos, midpoint_y, 0, -arrow_length, **arrow_properties)
+    mpl.plt.text(
+        x_pos + label_offset_x,
+        midpoint_y,
+        format_bandwidth(bandwidth_gb),
+        ha="left",
+        va="center",
+        fontsize=8,
+        color="black",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.85),
+        zorder=3,
+    )
+
+
+def _normalize_fanout_angle(angle: float, direction: str) -> float:
+    if direction == "up":
+        return max(5.0, min(175.0, angle))
+
+    if angle < 0:
+        angle += 360
+    return max(185.0, min(355.0, angle))
+
+
+def get_fanout_annotation(
+    graph: nx.Graph,
+    pos: dict[str, tuple[float, float]],
+    visible_nodes: set[str],
+    node: str,
+    direction: str,
+    geometry: NodeBoxGeometry,
+) -> FanoutAnnotation | None:
+    x, y = pos[node]
+    y_multiplier = 1 if direction == "up" else -1
+    anchor_y = y + (geometry.half_height * y_multiplier)
+    node_layer_index = node_attrs(graph, node)["layer_index"]
+
+    total_cables = 0
+    total_bandwidth_gb = 0.0
+    visible_angles: list[float] = []
+
+    for neighbor in graph.neighbors(node):
+        neighbor_layer_index = node_attrs(graph, neighbor)["layer_index"]
+        if direction == "up" and neighbor_layer_index <= node_layer_index:
+            continue
+        if direction == "down" and neighbor_layer_index >= node_layer_index:
+            continue
+
+        metadata = edge_attrs(graph, node, neighbor)
+        num_cables = cable_count(metadata)
+        if num_cables <= 0:
+            continue
+
+        total_cables += num_cables
+        total_bandwidth_gb += num_cables * cable_bandwidth_gb(metadata)
+
+        if neighbor not in visible_nodes:
+            continue
+
+        neighbor_x, raw_neighbor_y = pos[neighbor]
+        neighbor_anchor_y = raw_neighbor_y - (geometry.half_height * y_multiplier)
+        angle = math.degrees(math.atan2(neighbor_anchor_y - anchor_y, neighbor_x - x))
+        visible_angles.append(_normalize_fanout_angle(angle, direction))
+
+    if total_cables <= 0 or total_bandwidth_gb <= 0 or len(visible_angles) < 2:
+        return None
+
+    if direction == "up":
+        theta1 = min(visible_angles) - 6.0
+        theta2 = max(visible_angles) + 6.0
+    else:
+        theta1 = min(visible_angles) - 8.0
+        theta2 = max(visible_angles) + 8.0
+
+    label_padding = geometry.fanout_radius_padding + 0.28
+    if (theta2 - theta1) <= geometry.fanout_narrow_span_threshold_deg:
+        label_padding += geometry.fanout_narrow_extra_padding
+
+    mid_angle = math.radians((theta1 + theta2) / 2)
+    arc_mid_x = x + (geometry.fanout_arc_width / 2) * math.cos(mid_angle)
+    arc_mid_y = anchor_y + (geometry.fanout_arc_height / 2) * math.sin(mid_angle)
+    label_x = arc_mid_x + label_padding * math.cos(mid_angle)
+    label_y = arc_mid_y + label_padding * math.sin(mid_angle)
+    label_y += 0.08 if direction == "up" else -0.08
+
+    return {
+        "center": (x, anchor_y),
+        "width": geometry.fanout_arc_width,
+        "height": geometry.fanout_arc_height,
+        "theta1": theta1,
+        "theta2": theta2,
+        "label": format_fanout_label(total_cables, total_bandwidth_gb),
+        "label_pos": (label_x, label_y),
+    }
+
+
+def draw_layer_bandwidth_indicators(
+    graph: nx.Graph,
+    ax: Any,
+    pos: dict[str, tuple[float, float]],
+    visible_nodes: set[str],
+    geometry: NodeBoxGeometry,
+) -> None:
+    for node in get_leftmost_visible_nodes_by_layer(graph, pos, visible_nodes).values():
+        add_bandwidth_indicators(ax, pos, node, node_attrs(graph, node), geometry)
+
+
+def draw_fanout_annotations(
+    graph: nx.Graph,
+    ax: Any,
+    pos: dict[str, tuple[float, float]],
+    visible_nodes: set[str],
+    geometry: NodeBoxGeometry,
+) -> None:
+    mpl = _mpl()
+    for node in get_leftmost_visible_nodes_by_layer(graph, pos, visible_nodes).values():
+        for direction in ("up", "down"):
+            annotation = get_fanout_annotation(
+                graph,
+                pos,
+                visible_nodes,
+                node,
+                direction,
+                geometry,
+            )
+            if not annotation:
+                continue
+
+            arc = mpl.Arc(
+                annotation["center"],
+                annotation["width"],
+                annotation["height"],
+                theta1=annotation["theta1"],
+                theta2=annotation["theta2"],
+                linewidth=1.5,
+                color="black",
+                zorder=3,
+            )
+            ax.add_patch(arc)
+            ax.text(
+                annotation["label_pos"][0],
+                annotation["label_pos"][1],
+                annotation["label"],
+                fontsize=FANOUT_LABEL_FONT_SIZE,
+                ha="center",
+                va="center",
+                zorder=4,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.92, pad=0.2),
+            )
+
+
+def draw_visible_nodes(
+    graph: nx.Graph,
+    ax: Any,
+    positions: dict[str, tuple[float, float]],
+    visible_nodes: set[str],
+    geometry: NodeBoxGeometry,
+) -> None:
+    mpl = _mpl()
+    for node in sorted(
+        visible_nodes,
+        key=lambda item: (node_attrs(graph, item)["layer_index"], positions[item][0]),
+    ):
+        x, y = positions[node]
+        data = node_attrs(graph, node)
+        ax.add_patch(
+            mpl.Rectangle(
+                (x - (geometry.width / 2), y - (geometry.height / 2)),
+                geometry.width,
+                geometry.height,
+                facecolor=get_layer_color(data["layer_index"]),
+                edgecolor="black",
+                zorder=2,
+            )
+        )
+        ax.text(
+            x,
+            y + geometry.name_y_offset,
+            format_node_name(data["layer_name"]),
+            fontsize=NODE_NAME_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y + geometry.ordinal_y_offset,
+            str(data["node_ordinal"]),
+            fontsize=NODE_METADATA_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y + geometry.ports_value_y_offset,
+            f"{data['used_lane_units']}/{data['total_lane_units']}",
+            fontsize=PORT_USAGE_VALUE_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y + geometry.ports_label_y_offset,
+            "lanes used",
+            fontsize=PORT_USAGE_LABEL_FONT_SIZE,
+            ha="center",
+            va="center",
+            zorder=3,
+        )
+
+
+def draw_group_bandwidth_arrows(
+    graph: nx.Graph,
+    ax: Any,
+    layout: LayoutResult,
+    render_summary: RenderSummary | None = None,
+) -> None:
+    if not layout.group_bounds:
+        return
+
+    group_indexes = {
+        cast(int, node_attrs(graph, node).get("group_index"))
+        for node in layout.positions
+        if node_attrs(graph, node).get("group_index") is not None
+    }
+    if not group_indexes:
+        return
+
+    group_index = max(
+        group_indexes,
+        key=lambda index: compute_group_bandwidth_arrow_x(
+            graph,
+            layout.positions,
+            layout.profile,
+            index,
+        ),
+    )
+
+    grouped_layers = sorted(
+        {
+            data["layer_index"]
+            for _, data in graph.nodes(data=True)
+            if data.get("group_index") is not None
+        }
+    )
+    if len(grouped_layers) < 2:
+        return
+
+    x_pos = compute_group_bandwidth_arrow_x(graph, layout.positions, layout.profile, group_index)
+    for lower_index, upper_index in zip(grouped_layers[:-1], grouped_layers[1:]):
+        if render_summary is None:
+            render_summary = build_render_summary(graph)
+        bandwidth = render_summary.group_layer_bandwidths.get(
+            (group_index, lower_index, upper_index),
+            0.0,
+        )
+        if bandwidth <= 0:
+            continue
+        add_layer_bandwidth_arrow(
+            ax,
+            layout.layer_heights[lower_index],
+            layout.layer_heights[upper_index],
+            bandwidth,
+            x_pos,
+        )
+
+
+def visualize_single_topology(
+    graph: nx.Graph,
+    layout: LayoutResult,
+    output_dir: str | PathLike[str] | None = None,
+    filename: str = "topology.png",
+    title: str = "Network Topology",
+    render_summary: RenderSummary | None = None,
+) -> None:
+    logger.info("Starting topology visualization")
+
+    if render_summary is None:
+        render_summary = build_render_summary(graph)
+    mpl = _mpl()
+    x_limits, y_limits = calculate_plot_limits(layout)
+    figure_width, figure_height = build_figure_size(x_limits, y_limits, layout.profile)
+    _, ax = mpl.plt.subplots(figsize=(figure_width, figure_height))
+    bandwidth_colors = get_bandwidth_colors(graph)
+    geometry = layout.profile.node_box
+
+    for left, bottom, width, height, label in layout.group_bounds:
+        ax.add_patch(
+            mpl.Rectangle(
+                (left, bottom),
+                width,
+                height,
+                facecolor="none",
+                edgecolor="#666666",
+                linestyle="--",
+                linewidth=1.0,
+                zorder=0,
+            )
+        )
+        ax.text(
+            left + (width / 2),
+            bottom - 0.28,
+            label,
+            ha="center",
+            va="top",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    for x, y, text in layout.placeholder_labels:
+        ax.text(
+            x,
+            y,
+            text,
+            ha="center",
+            va="center",
+            fontsize=13,
+            fontweight="bold",
+            fontfamily="monospace",
+            zorder=1,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=0.2),
+        )
+
+    for source, target in graph.edges():
+        if source not in layout.visible_nodes or target not in layout.visible_nodes:
+            continue
+
+        x1, y1 = layout.positions[source]
+        x2, y2 = layout.positions[target]
+        metadata = edge_attrs(graph, source, target)
+        bandwidth = cable_bandwidth_gb(metadata)
+        num_cables = cable_count(metadata) or 1
+        color = bandwidth_colors[bandwidth]
+
+        if y1 < y2:
+            y1 += geometry.half_height
+            y2 -= geometry.half_height
+        else:
+            y1 -= geometry.half_height
+            y2 += geometry.half_height
+
+        mpl.plt.plot([x1, x2], [y1, y2], "-", color=color, linewidth=2, zorder=1)
+
+        if num_cables > 1:
+            mpl.plt.text(
+                (x1 + x2) / 2,
+                (y1 + y2) / 2,
+                str(num_cables),
+                horizontalalignment="center",
+                verticalalignment="center",
+                bbox=dict(
+                    facecolor="white",
+                    edgecolor="black",
+                    alpha=1,
+                    boxstyle="circle",
+                ),
+                zorder=2,
+                fontsize=8,
+            )
+
+    draw_visible_nodes(graph, ax, layout.positions, layout.visible_nodes, geometry)
+    draw_layer_bandwidth_indicators(
+        graph,
+        ax,
+        layout.positions,
+        layout.visible_nodes,
+        geometry,
+    )
+    draw_fanout_annotations(
+        graph,
+        ax,
+        layout.positions,
+        layout.visible_nodes,
+        geometry,
+    )
+
+    layer_indices = sorted(render_summary.all_nodes_by_layer)
+    for lower_index, upper_index in zip(layer_indices[:-1], layer_indices[1:]):
+        layer_bandwidth = layer_bandwidth_from_summary(
+            render_summary,
+            lower_index,
+            upper_index,
+        )
+        if layer_bandwidth > 0:
+            add_layer_bandwidth_arrow(
+                ax,
+                layout.layer_heights[lower_index],
+                layout.layer_heights[upper_index],
+                layer_bandwidth,
+                layout.layer_bandwidth_x,
+            )
+
+    draw_group_bandwidth_arrows(graph, ax, layout, render_summary)
+
+    legend_elements = [
+        mpl.Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor="w",
+            markeredgecolor="black",
+            markersize=10,
+            label="Cable count",
+        )
+    ]
+    for bandwidth, color in bandwidth_colors.items():
+        legend_elements.append(
+            mpl.Patch(
+                facecolor=color,
+                label=format_bandwidth(float(bandwidth)),
+            )
+        )
+
+    ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(0.01, 0.99))
+
+    mpl.plt.xlim(*x_limits)
+    mpl.plt.ylim(*y_limits)
+    mpl.plt.title(title)
+    mpl.plt.axis("off")
+
+    if output_dir:
+        output_path = Path(output_dir) / filename
+        mpl.plt.savefig(
+            output_path,
+            bbox_inches="tight",
+            dpi=300,
+            pad_inches=layout.profile.save_padding_inches,
+        )
+        logger.info("Saved topology visualization to %s", output_path)
+    else:
+        mpl.plt.show()
+
+    mpl.plt.close()

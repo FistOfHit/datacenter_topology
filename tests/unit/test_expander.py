@@ -1,6 +1,6 @@
 import pytest
 
-from topology_generator.config_schema import InvalidTopologyConfig
+from topology_generator.config_types import InvalidTopologyConfig
 from topology_generator.expander import expand_topology
 
 

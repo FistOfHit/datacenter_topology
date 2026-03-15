@@ -1,5 +1,15 @@
 # Configuration Reference
 
+This document is the normative configuration contract for the project.
+
+- Use this file for the exact supported schema and validation rules.
+- Use [README.md](../README.md) for a quick-start overview.
+- Use [examples.md](examples.md) for illustrative example configs and expected
+  results.
+
+Examples in this document are illustrative. They do not define alternate or
+more permissive schema behavior.
+
 ## Shape
 
 Single-fabric mode expects:
@@ -112,6 +122,7 @@ Rules:
 
 - `gpu_nodes` is required in multi-fabric mode and forbidden in single-fabric mode.
 - `total_nodes` is required and must be greater than zero.
+- legacy `gpu_nodes.nodes_per_group` is not accepted; define the shared population with `total_nodes` and the partitions with top-level `groupings`
 - `fabric_port_layouts` must be a non-empty mapping from fabric name to a valid port layout
 - every `fabric_port_layouts` key must match exactly one fabric name after normalization
 - extra, missing, or misspelled fabric keys are rejected
@@ -261,7 +272,10 @@ Validation happens in two passes.
 After the config is expanded into concrete nodes and concrete link bundles, the tool checks:
 
 - required lane units per node
-- deterministic contiguous lane allocation for every cable
+- supported cable bandwidth on each expanded endpoint
+
+Deterministic contiguous lane allocation happens later during graph
+materialization, after expanded-topology validation succeeds.
 
 All failures are reported together using the expanded node IDs.
 
@@ -321,16 +335,9 @@ fabrics:
 Rules:
 
 - `name` is required and must be unique after normalization
-- `grouping` is required for canonical multi-fabric configs and must reference one declared `groupings[*].name`
+- `grouping` is required and must reference one declared `groupings[*].name`
 - `layers` must contain at least one fabric-local layer
 - `links` uses the same schema as single-fabric mode
 - every fabric uses the full `gpu_nodes` population in v1
 - only `gpu_nodes` is shared across fabrics in v1
-
-Compatibility:
-
-- the parser still accepts the previous multi-fabric shape using top-level `groups`,
-  `gpu_nodes.nodes_per_group`, and fabric-local placements like `pod`
-- legacy multi-fabric configs are normalized internally to the canonical `groupings`
-  representation for one compatibility cycle
-- legacy multi-fabric configs that used only global placements do not need `fabrics[*].grouping`
+- old multi-fabric aliases are rejected; use top-level `groupings`, `gpu_nodes.total_nodes`, explicit `fabrics[*].grouping`, and `placement: group` for grouping-relative layers

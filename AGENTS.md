@@ -23,9 +23,10 @@ python -m topology_generator.main --config config.yaml --output-dir output
 ## Important Files
 
 - `topology_generator/main.py`: end-to-end orchestration.
-- `topology_generator/config_schema.py`: typed configuration model and validation rules.
+- `topology_generator/config_types.py`: typed configuration model and `TopologyConfig`.
+- `topology_generator/config_parser.py` / `topology_generator/config_validation.py`: config parsing and semantic validation.
 - `topology_generator/topology_generator.py`: graph construction and link allocation.
-- `topology_generator/visualiser.py`: condensed rendering and annotation logic.
+- `topology_generator/rendering.py` / `topology_generator/render_layout.py` / `topology_generator/render_drawing.py`: condensed rendering pipeline, layout, and annotation logic.
 - `topology_generator/port_mapper.py`: Excel row extraction and export.
 - `tests/`: behavior-focused unit and integration coverage.
 - `docs/architecture.md`: system-level design notes.
@@ -53,6 +54,6 @@ python -m topology_generator.main --config config.yaml --output-dir output
 
 ## Testing Expectations
 
-- Run `python -m pytest -q` after code changes.
-- Run `python -m ruff check .` after Python or doc config changes.
+- Prefer `make test` and `make lint`.
+- If you need direct commands, use `python3 -m ...` or `./.venv/bin/python -m ...`, not bare `python`, for validation tooling.
 - Keep tests behavior-oriented; avoid adding new mock-only tests where a real graph or real file is practical.

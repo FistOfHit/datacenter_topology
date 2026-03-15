@@ -1,6 +1,6 @@
 import pytest
 
-from topology_generator.config_schema import InvalidTopologyConfig, TopologyConfig
+from topology_generator.config_types import InvalidTopologyConfig, TopologyConfig
 
 
 def test_topology_config_accepts_lane_based_schema(mixed_speed_config):
@@ -340,7 +340,7 @@ def test_topology_config_reports_correct_multi_fabric_layer_path_for_placement_e
         TopologyConfig.from_mapping(config)
 
 
-def test_topology_config_accepts_legacy_multi_fabric_shape():
+def test_topology_config_rejects_legacy_multi_fabric_groups_shape():
     config = {
         "groups": [
             {
@@ -396,19 +396,18 @@ def test_topology_config_accepts_legacy_multi_fabric_shape():
         ],
     }
 
-    parsed = TopologyConfig.from_mapping(config)
+    with pytest.raises(
+        InvalidTopologyConfig,
+        match="use 'groupings' instead of 'groups' in multi-fabric mode",
+    ):
+        TopologyConfig.from_mapping(config)
 
-    assert parsed.gpu_nodes is not None
-    assert parsed.gpu_nodes.total_nodes == 2
-    assert parsed.grouping("pod").members_per_group == 2
-    assert parsed.fabric("backend").grouping == "pod"
 
-
-def test_topology_config_accepts_legacy_multi_fabric_global_only_shape():
+def test_topology_config_rejects_missing_groupings_in_multi_fabric_mode():
     config = {
         "groups": [],
         "gpu_nodes": {
-            "nodes_per_group": 2,
+            "total_nodes": 2,
             "fabric_port_layouts": {
                 "backend": {
                     "base_lane_bandwidth_gb": 100,
@@ -455,12 +454,202 @@ def test_topology_config_accepts_legacy_multi_fabric_global_only_shape():
         ],
     }
 
-    parsed = TopologyConfig.from_mapping(config)
+    with pytest.raises(
+        InvalidTopologyConfig,
+        match="must declare top-level 'groupings'",
+    ):
+        TopologyConfig.from_mapping(config)
 
-    assert parsed.gpu_nodes is not None
-    assert parsed.gpu_nodes.total_nodes == 2
-    assert parsed.groupings == ()
-    assert parsed.fabric("backend").grouping is None
+
+def test_topology_config_rejects_legacy_gpu_nodes_nodes_per_group():
+    config = {
+        "groupings": [
+            {
+                "name": "pod",
+                "members_per_group": 2,
+            }
+        ],
+        "gpu_nodes": {
+            "nodes_per_group": 2,
+            "fabric_port_layouts": {
+                "backend": {
+                    "base_lane_bandwidth_gb": 100,
+                    "total_lane_units": 1,
+                    "supported_port_modes": [
+                        {
+                            "port_bandwidth_gb": 100,
+                            "lane_units": 1,
+                        }
+                    ],
+                }
+            },
+        },
+        "fabrics": [
+            {
+                "name": "backend",
+                "grouping": "pod",
+                "layers": [
+                    {
+                        "name": "leaf",
+                        "placement": "group",
+                        "nodes_per_group": 1,
+                        "port_layout": {
+                            "base_lane_bandwidth_gb": 100,
+                            "total_lane_units": 2,
+                            "supported_port_modes": [
+                                {
+                                    "port_bandwidth_gb": 100,
+                                    "lane_units": 1,
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "links": [
+                    {
+                        "from": "gpu_nodes",
+                        "to": "leaf",
+                        "policy": "within_group_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(
+        InvalidTopologyConfig,
+        match=r"gpu_nodes\.nodes_per_group is no longer supported; use gpu_nodes\.total_nodes",
+    ):
+        TopologyConfig.from_mapping(config)
+
+
+def test_topology_config_rejects_missing_fabric_grouping():
+    config = {
+        "groupings": [
+            {
+                "name": "pod",
+                "members_per_group": 2,
+            }
+        ],
+        "gpu_nodes": {
+            "total_nodes": 2,
+            "fabric_port_layouts": {
+                "backend": {
+                    "base_lane_bandwidth_gb": 100,
+                    "total_lane_units": 1,
+                    "supported_port_modes": [
+                        {
+                            "port_bandwidth_gb": 100,
+                            "lane_units": 1,
+                        }
+                    ],
+                }
+            },
+        },
+        "fabrics": [
+            {
+                "name": "backend",
+                "layers": [
+                    {
+                        "name": "mgmt",
+                        "placement": "global",
+                        "nodes_per_group": 1,
+                        "port_layout": {
+                            "base_lane_bandwidth_gb": 100,
+                            "total_lane_units": 2,
+                            "supported_port_modes": [
+                                {
+                                    "port_bandwidth_gb": 100,
+                                    "lane_units": 1,
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "links": [
+                    {
+                        "from": "gpu_nodes",
+                        "to": "mgmt",
+                        "policy": "global_to_global_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(
+        InvalidTopologyConfig,
+        match=r"fabrics\[0\]\.grouping is required in multi-fabric configs",
+    ):
+        TopologyConfig.from_mapping(config)
+
+
+def test_topology_config_rejects_legacy_multi_fabric_group_placement_name():
+    config = {
+        "groupings": [
+            {
+                "name": "pod",
+                "members_per_group": 2,
+            }
+        ],
+        "gpu_nodes": {
+            "total_nodes": 2,
+            "fabric_port_layouts": {
+                "backend": {
+                    "base_lane_bandwidth_gb": 100,
+                    "total_lane_units": 1,
+                    "supported_port_modes": [
+                        {
+                            "port_bandwidth_gb": 100,
+                            "lane_units": 1,
+                        }
+                    ],
+                }
+            },
+        },
+        "fabrics": [
+            {
+                "name": "backend",
+                "grouping": "pod",
+                "layers": [
+                    {
+                        "name": "leaf",
+                        "placement": "pod",
+                        "nodes_per_group": 1,
+                        "port_layout": {
+                            "base_lane_bandwidth_gb": 100,
+                            "total_lane_units": 2,
+                            "supported_port_modes": [
+                                {
+                                    "port_bandwidth_gb": 100,
+                                    "lane_units": 1,
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "links": [
+                    {
+                        "from": "gpu_nodes",
+                        "to": "leaf",
+                        "policy": "within_group_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(
+        InvalidTopologyConfig,
+        match=r"must be 'global' or 'group' in multi-fabric mode",
+    ):
+        TopologyConfig.from_mapping(config)
 
 
 def test_topology_config_rejects_reserved_gpu_nodes_grouping_name():

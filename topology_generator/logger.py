@@ -1,7 +1,6 @@
-import argparse
 import logging
 import sys
-import os
+from os import PathLike
 
 from topology_generator.file_handler import ensure_output_dir
 
@@ -9,7 +8,7 @@ from topology_generator.file_handler import ensure_output_dir
 LOGGER_NAME = "topology_generator"
 
 
-def setup_logging(args: argparse.Namespace) -> logging.Logger:
+def setup_logging(output_dir: str | PathLike[str]) -> logging.Logger:
     """
     Set up logging configuration for the application.
 
@@ -17,12 +16,12 @@ def setup_logging(args: argparse.Namespace) -> logging.Logger:
     specified output directory.
 
     Args:
-        args: Command line arguments containing output_dir.
+        output_dir: Final output directory for generated files.
 
     Returns:
         logging.Logger: Configured logger instance.
     """
-    output_dir = ensure_output_dir(args.output_dir)
+    output_path = ensure_output_dir(output_dir)
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -36,10 +35,7 @@ def setup_logging(args: argparse.Namespace) -> logging.Logger:
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
 
-    file_handler = logging.FileHandler(
-        os.path.join(output_dir, "network_topology.log"),
-        mode="w",
-    )
+    file_handler = logging.FileHandler(output_path / "network_topology.log", mode="w")
     file_handler.setFormatter(formatter)
 
     logger.addHandler(stream_handler)

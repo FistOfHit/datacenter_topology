@@ -101,3 +101,38 @@ def test_main_creates_multi_fabric_outputs(tmp_path, multi_fabric_config):
     excel_data = pd.read_excel(output_dir / "port_mapping.xlsx")
     assert "fabric" in excel_data.columns
     assert len(excel_data) == 7
+
+
+def test_main_timestamp_writes_outputs_to_resolved_directory(tmp_path, sample_config_file):
+    base_output_dir = tmp_path / "outputs"
+    resolved_output_dir = base_output_dir / "20260314_120000"
+
+    with patch(
+        "sys.argv",
+        [
+            "main.py",
+            "--config",
+            str(sample_config_file),
+            "--output-dir",
+            str(base_output_dir),
+            "--timestamp",
+        ],
+    ):
+        with patch(
+            "topology_generator.file_handler.resolve_output_dir",
+            return_value=resolved_output_dir,
+        ) as mock_resolve_output_dir:
+            main()
+
+    mock_resolve_output_dir.assert_called_once_with(str(base_output_dir), True)
+    assert (resolved_output_dir / "topology.png").exists()
+    assert (resolved_output_dir / "port_mapping.xlsx").exists()
+    assert (resolved_output_dir / "network_topology.log").exists()
+    assert not (base_output_dir / "topology.png").exists()
+    assert not (base_output_dir / "port_mapping.xlsx").exists()
+    assert not (base_output_dir / "network_topology.log").exists()
+
+    log_contents = (resolved_output_dir / "network_topology.log").read_text(
+        encoding="utf-8"
+    )
+    assert f"Created output directory: {resolved_output_dir}" in log_contents
