@@ -40,8 +40,8 @@ layers.
 - Single-fabric mode uses `groups`, `layers`, and `links`.
 - Multi-fabric mode shares one `gpu_nodes` layer across multiple isolated
   fabrics via `groupings`, `gpu_nodes`, and `fabrics`.
-- Port capacity is modeled in lane units, so one device can legally expose more
-  than one port speed from the same hardware budget.
+- Port capacity is modeled in lane units through named `port_pools`, so one
+  device can expose multiple independent lane budgets and mixed-speed modes.
 
 ## Quick Start
 
@@ -105,8 +105,9 @@ groupings:
   - ...
 gpu_nodes:
   total_nodes: ...
-  fabric_port_layouts:
-    backend: ...
+  fabric_port_pools:
+    backend:
+      - ...
 fabrics:
   - ...
 ```
@@ -114,6 +115,9 @@ fabrics:
 In multi-fabric mode, each fabric declares `gpu_nodes_placement` and each
 fabric-local layer uses a literal `placement` such as `rack`, `pod`, or
 `global`.
+
+Every node-capable object now uses ordered `port_pools`, and every link names
+the pool it consumes via `port_pool`.
 
 Use [Configuration Reference](docs/configuration.md) for the canonical schema
 and validation rules.

@@ -5,7 +5,11 @@ from typing import Any, cast
 
 import networkx as nx
 
-from topology_generator.graph_metadata import cable_bandwidth_gb, cable_count, node_attrs, node_sort_key
+from topology_generator.graph_metadata import (
+    node_attrs,
+    node_sort_key,
+    total_edge_bandwidth_gb,
+)
 from topology_generator.render_formatting import (
     format_bandwidth,
     format_hidden_group_label,
@@ -22,11 +26,11 @@ from topology_generator.render_types import (
 def compute_node_box_geometry() -> NodeBoxGeometry:
     return NodeBoxGeometry(
         width=2.05,
-        height=1.34,
-        name_y_offset=0.42,
-        ordinal_y_offset=0.16,
-        ports_value_y_offset=-0.20,
-        ports_label_y_offset=-0.45,
+        height=1.46,
+        name_y_offset=0.47,
+        ordinal_y_offset=0.18,
+        ports_value_y_offset=-0.14,
+        ports_label_y_offset=-0.42,
         aggregate_x_offset=-2.35,
         aggregate_text_offset=0.18,
         aggregate_arrow_size=0.18,
@@ -93,7 +97,7 @@ def build_render_summary(graph: nx.Graph) -> RenderSummary:
         target_layer_index = target_data["layer_index"]
         lower_layer_index = min(source_layer_index, target_layer_index)
         upper_layer_index = max(source_layer_index, target_layer_index)
-        bundle_bandwidth = cable_bandwidth_gb(attrs) * cable_count(attrs)
+        bundle_bandwidth = total_edge_bandwidth_gb(attrs)
         layer_key = (lower_layer_index, upper_layer_index)
         layer_bandwidths[layer_key] = layer_bandwidths.get(layer_key, 0.0) + bundle_bandwidth
 
@@ -180,7 +184,7 @@ def calculate_layer_bandwidth(
             (source in lower_set and target in upper_set)
             or (source in upper_set and target in lower_set)
         ):
-            total_bandwidth += cable_bandwidth_gb(attrs) * cable_count(attrs)
+            total_bandwidth += total_edge_bandwidth_gb(attrs)
 
     return total_bandwidth
 
@@ -716,7 +720,7 @@ def _multi_scope_bandwidths_by_scope_and_layer(
         key = (shared_scope_key, lower_layer_index, upper_layer_index)
         bandwidths_by_scope_and_layer[key] = (
             bandwidths_by_scope_and_layer.get(key, 0.0)
-            + (cable_bandwidth_gb(attrs) * cable_count(attrs))
+            + total_edge_bandwidth_gb(attrs)
         )
 
     return bandwidths_by_scope_and_layer

@@ -4,6 +4,26 @@ from topology_generator.config_types import InvalidTopologyConfig
 from topology_generator.expander import expand_topology
 
 
+def _pool(
+    name: str,
+    base_lane_bandwidth_gb: float,
+    total_lane_units: int,
+    supported_modes: list[tuple[float, int]],
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "base_lane_bandwidth_gb": base_lane_bandwidth_gb,
+        "total_lane_units": total_lane_units,
+        "supported_port_modes": [
+            {
+                "port_bandwidth_gb": port_bandwidth_gb,
+                "lane_units": lane_units,
+            }
+            for port_bandwidth_gb, lane_units in supported_modes
+        ],
+    }
+
+
 def test_expand_topology_creates_grouped_and_global_nodes(sample_config):
     expanded = expand_topology(sample_config)
 
@@ -24,6 +44,7 @@ def test_expand_topology_applies_bandwidth_specific_lane_units(mixed_speed_confi
 
     grouped_links = {
         (link.source_node_id, link.target_node_id): (
+            link.port_pool,
             link.cable_bandwidth_gb,
             link.source_lane_units_per_cable,
             link.target_lane_units_per_cable,
@@ -31,8 +52,61 @@ def test_expand_topology_applies_bandwidth_specific_lane_units(mixed_speed_confi
         for link in expanded.links
     }
 
-    assert grouped_links[("pod_1_compute_1", "pod_1_leaf_switch_1")] == (400.0, 1, 1)
-    assert grouped_links[("pod_1_leaf_switch_1", "spine_1")] == (800.0, 2, 2)
+    assert grouped_links[("pod_1_compute_1", "pod_1_leaf_switch_1")] == (
+        "fabric",
+        400.0,
+        1,
+        1,
+    )
+    assert grouped_links[("pod_1_leaf_switch_1", "spine_1")] == (
+        "fabric",
+        800.0,
+        2,
+        2,
+    )
+
+
+def test_expand_topology_carries_multi_pool_links_without_cross_pool_leakage():
+    config = {
+        "groups": [],
+        "layers": [
+            {
+                "name": "leaf",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    _pool("fabric", 400, 2, [(400, 1)]),
+                    _pool("mgmt", 100, 4, [(100, 1)]),
+                ],
+            },
+            {
+                "name": "spine",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    _pool("fabric", 400, 2, [(400, 1)]),
+                    _pool("mgmt", 100, 4, [(100, 1)]),
+                ],
+            },
+        ],
+        "links": [
+            {
+                "from": "leaf",
+                "to": "spine",
+                "policy": "global_full_mesh",
+                "port_pool": "mgmt",
+                "cables_per_pair": 2,
+                "cable_bandwidth_gb": 100,
+            }
+        ],
+    }
+
+    expanded = expand_topology(config)
+
+    assert len(expanded.links) == 1
+    assert expanded.links[0].port_pool == "mgmt"
+    assert expanded.links[0].source_lane_units_per_cable == 1
+    assert expanded.links[0].target_lane_units_per_cable == 1
 
 
 def test_expand_topology_rejects_colliding_node_ids_during_schema_validation():
@@ -48,31 +122,13 @@ def test_expand_topology_rejects_colliding_node_ids_during_schema_validation():
                 "name": "compute",
                 "placement": "pod",
                 "nodes_per_group": 1,
-                "port_layout": {
-                    "base_lane_bandwidth_gb": 100,
-                    "total_lane_units": 1,
-                    "supported_port_modes": [
-                        {
-                            "port_bandwidth_gb": 100,
-                            "lane_units": 1,
-                        }
-                    ],
-                },
+                "port_pools": [_pool("fabric", 100, 1, [(100, 1)])],
             },
             {
                 "name": "pod_1_compute",
                 "placement": "global",
                 "nodes_per_group": 1,
-                "port_layout": {
-                    "base_lane_bandwidth_gb": 100,
-                    "total_lane_units": 1,
-                    "supported_port_modes": [
-                        {
-                            "port_bandwidth_gb": 100,
-                            "lane_units": 1,
-                        }
-                    ],
-                },
+                "port_pools": [_pool("fabric", 100, 1, [(100, 1)])],
             },
         ],
         "links": [
@@ -80,6 +136,7 @@ def test_expand_topology_rejects_colliding_node_ids_during_schema_validation():
                 "from": "compute",
                 "to": "pod_1_compute",
                 "policy": "to_global_full_mesh",
+                "port_pool": "fabric",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 100,
             }
@@ -116,14 +173,8 @@ def test_expand_topology_pairs_child_scope_nodes_only_with_containing_ancestor_s
         ],
         "gpu_nodes": {
             "total_nodes": 4,
-            "fabric_port_layouts": {
-                "oob": {
-                    "base_lane_bandwidth_gb": 100,
-                    "total_lane_units": 1,
-                    "supported_port_modes": [
-                        {"port_bandwidth_gb": 100, "lane_units": 1}
-                    ],
-                }
+            "fabric_port_pools": {
+                "oob": [_pool("fabric", 100, 1, [(100, 1)])]
             },
         },
         "fabrics": [
@@ -135,25 +186,13 @@ def test_expand_topology_pairs_child_scope_nodes_only_with_containing_ancestor_s
                         "name": "leaf",
                         "placement": "rack",
                         "nodes_per_group": 1,
-                        "port_layout": {
-                            "base_lane_bandwidth_gb": 100,
-                            "total_lane_units": 2,
-                            "supported_port_modes": [
-                                {"port_bandwidth_gb": 100, "lane_units": 1}
-                            ],
-                        },
+                        "port_pools": [_pool("fabric", 100, 2, [(100, 1)])],
                     },
                     {
                         "name": "spine",
                         "placement": "pod",
                         "nodes_per_group": 1,
-                        "port_layout": {
-                            "base_lane_bandwidth_gb": 100,
-                            "total_lane_units": 2,
-                            "supported_port_modes": [
-                                {"port_bandwidth_gb": 100, "lane_units": 1}
-                            ],
-                        },
+                        "port_pools": [_pool("fabric", 100, 2, [(100, 1)])],
                     },
                 ],
                 "links": [
@@ -161,6 +200,7 @@ def test_expand_topology_pairs_child_scope_nodes_only_with_containing_ancestor_s
                         "from": "gpu_nodes",
                         "to": "leaf",
                         "policy": "same_scope_full_mesh",
+                        "port_pool": "fabric",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     },
@@ -168,6 +208,7 @@ def test_expand_topology_pairs_child_scope_nodes_only_with_containing_ancestor_s
                         "from": "leaf",
                         "to": "spine",
                         "policy": "to_ancestor_full_mesh",
+                        "port_pool": "fabric",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     },

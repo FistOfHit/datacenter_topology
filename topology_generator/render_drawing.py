@@ -8,7 +8,17 @@ from typing import Any, Mapping, cast
 
 import networkx as nx
 
-from topology_generator.graph_metadata import FanoutAnnotation, cable_bandwidth_gb, cable_count, edge_attrs, node_attrs
+from topology_generator.graph_metadata import (
+    FanoutAnnotation,
+    LinkBundleAttrs,
+    cable_bandwidth_gb,
+    edge_attrs,
+    link_bundle_attrs,
+    node_attrs,
+    port_pool_attrs,
+    total_edge_bandwidth_gb,
+    total_edge_cable_count,
+)
 from topology_generator.render_environment import load_matplotlib
 from topology_generator.render_formatting import (
     FANOUT_LABEL_FONT_SIZE,
@@ -16,9 +26,11 @@ from topology_generator.render_formatting import (
     NODE_NAME_FONT_SIZE,
     PORT_USAGE_LABEL_FONT_SIZE,
     PORT_USAGE_VALUE_FONT_SIZE,
+    format_additional_port_pools,
     format_bandwidth,
     format_fanout_label,
     format_node_name,
+    format_port_pool_summary,
     get_bandwidth_colors,
     get_layer_color,
 )
@@ -204,12 +216,12 @@ def get_fanout_annotation(
             continue
 
         metadata = edge_attrs(graph, node, neighbor)
-        num_cables = cable_count(metadata)
+        num_cables = total_edge_cable_count(metadata)
         if num_cables <= 0:
             continue
 
         total_cables += num_cables
-        total_bandwidth_gb += num_cables * cable_bandwidth_gb(metadata)
+        total_bandwidth_gb += total_edge_bandwidth_gb(metadata)
 
         if neighbor not in visible_nodes:
             continue
@@ -352,24 +364,44 @@ def draw_visible_nodes(
             va="center",
             zorder=3,
         )
-        ax.text(
-            x,
-            y + geometry.ports_value_y_offset,
-            f"{data['used_lane_units']}/{data['total_lane_units']}",
-            fontsize=PORT_USAGE_VALUE_FONT_SIZE,
-            ha="center",
-            va="center",
-            zorder=3,
-        )
-        ax.text(
-            x,
-            y + geometry.ports_label_y_offset,
-            "lanes used",
-            fontsize=PORT_USAGE_LABEL_FONT_SIZE,
-            ha="center",
-            va="center",
-            zorder=3,
-        )
+        pool_lines = _visible_port_pool_lines(data)
+        if pool_lines:
+            ax.text(
+                x,
+                y + geometry.ports_value_y_offset,
+                pool_lines[0],
+                fontsize=PORT_USAGE_VALUE_FONT_SIZE,
+                ha="center",
+                va="center",
+                zorder=3,
+            )
+        if len(pool_lines) > 1:
+            ax.text(
+                x,
+                y + geometry.ports_label_y_offset,
+                pool_lines[1],
+                fontsize=PORT_USAGE_LABEL_FONT_SIZE,
+                ha="center",
+                va="center",
+                zorder=3,
+            )
+
+
+def _visible_port_pool_lines(data: Mapping[str, Any]) -> list[str]:
+    pools = list(port_pool_attrs(cast(dict[str, object], data)))
+    if not pools:
+        return []
+    if len(pools) == 1:
+        return [format_port_pool_summary(pools[0])]
+    if len(pools) == 2:
+        return [
+            format_port_pool_summary(pools[0]),
+            format_port_pool_summary(pools[1]),
+        ]
+    return [
+        format_port_pool_summary(pools[0]),
+        format_additional_port_pools(len(pools) - 1),
+    ]
 
 
 def draw_group_bandwidth_arrows(
@@ -453,7 +485,7 @@ def _draw_multi_scope_bandwidth_arrows(
         key = (shared_scope_key, lower_layer_index, upper_layer_index)
         bandwidths_by_scope_and_layer[key] = (
             bandwidths_by_scope_and_layer.get(key, 0.0)
-            + (cable_bandwidth_gb(attrs) * cable_count(attrs))
+            + total_edge_bandwidth_gb(attrs)
         )
 
     for (scope_key, lower_layer_index, upper_layer_index), bandwidth in sorted(
@@ -654,11 +686,6 @@ def visualize_single_topology(
 
         x1, y1 = layout.positions[source]
         x2, y2 = layout.positions[target]
-        metadata = edge_attrs(graph, source, target)
-        bandwidth = cable_bandwidth_gb(metadata)
-        num_cables = cable_count(metadata) or 1
-        color = bandwidth_colors[bandwidth]
-
         if y1 < y2:
             y1 += geometry.half_height
             y2 -= geometry.half_height
@@ -666,23 +693,19 @@ def visualize_single_topology(
             y1 -= geometry.half_height
             y2 += geometry.half_height
 
-        mpl.plt.plot([x1, x2], [y1, y2], "-", color=color, linewidth=2, zorder=1)
-
-        if num_cables > 1:
-            mpl.plt.text(
-                (x1 + x2) / 2,
-                (y1 + y2) / 2,
-                str(num_cables),
-                horizontalalignment="center",
-                verticalalignment="center",
-                bbox=dict(
-                    facecolor="white",
-                    edgecolor="black",
-                    alpha=1,
-                    boxstyle="circle",
-                ),
-                zorder=2,
-                fontsize=8,
+        metadata = edge_attrs(graph, source, target)
+        bundles = list(link_bundle_attrs(metadata))
+        for bundle_index, bundle in enumerate(bundles):
+            _draw_link_bundle(
+                mpl,
+                bandwidth_colors,
+                x1,
+                y1,
+                x2,
+                y2,
+                bundle,
+                bundle_index,
+                len(bundles),
             )
 
     draw_visible_nodes(graph, ax, layout.positions, layout.visible_nodes, geometry)
@@ -742,3 +765,78 @@ def visualize_single_topology(
         mpl.plt.show()
 
     mpl.plt.close()
+
+
+def _draw_link_bundle(
+    mpl: Any,
+    bandwidth_colors: dict[float, str],
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    bundle: LinkBundleAttrs,
+    bundle_index: int,
+    bundle_count: int,
+) -> None:
+    start_x, start_y, end_x, end_y = _offset_line_segment(
+        x1,
+        y1,
+        x2,
+        y2,
+        _bundle_line_offset(bundle_index, bundle_count),
+    )
+    bandwidth = cable_bandwidth_gb(bundle)
+    num_cables = bundle.get("num_cables", 0) or 1
+    color = bandwidth_colors[bandwidth]
+
+    mpl.plt.plot(
+        [start_x, end_x],
+        [start_y, end_y],
+        "-",
+        color=color,
+        linewidth=2,
+        zorder=1,
+    )
+
+    if num_cables > 1:
+        mpl.plt.text(
+            (start_x + end_x) / 2,
+            (start_y + end_y) / 2,
+            str(num_cables),
+            horizontalalignment="center",
+            verticalalignment="center",
+            bbox=dict(
+                facecolor="white",
+                edgecolor="black",
+                alpha=1,
+                boxstyle="circle",
+            ),
+            zorder=2,
+            fontsize=8,
+        )
+
+
+def _bundle_line_offset(bundle_index: int, bundle_count: int) -> float:
+    if bundle_count <= 1:
+        return 0.0
+    spacing = 0.12
+    return (bundle_index - ((bundle_count - 1) / 2)) * spacing
+
+
+def _offset_line_segment(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    offset: float,
+) -> tuple[float, float, float, float]:
+    if offset == 0:
+        return x1, y1, x2, y2
+    delta_x = x2 - x1
+    delta_y = y2 - y1
+    length = math.hypot(delta_x, delta_y)
+    if length == 0:
+        return x1, y1, x2, y2
+    offset_x = -delta_y / length * offset
+    offset_y = delta_x / length * offset
+    return x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y

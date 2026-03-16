@@ -25,8 +25,16 @@ def test_flatten_node_attrs_for_fabric_flattens_shared_gpu_metrics():
         "fabric_metrics": {
             "backend": {
                 "group_label": "pod_1",
-                "used_lane_units": 1,
-                "total_lane_units": 1,
+                "port_pools": (
+                    {
+                        "name": "fabric",
+                        "used_lane_units": 1,
+                        "total_lane_units": 1,
+                        "port_offset": 0,
+                        "base_lane_bandwidth_gb": 100,
+                        "supported_port_bandwidths_gb": (100.0,),
+                    },
+                ),
             }
         },
     }
@@ -36,7 +44,8 @@ def test_flatten_node_attrs_for_fabric_flattens_shared_gpu_metrics():
     assert flattened is not None
     assert flattened["fabric"] == "backend"
     assert flattened["group_label"] == "pod_1"
-    assert flattened["used_lane_units"] == 1
+    assert flattened["port_pools"][0]["used_lane_units"] == 1
+    assert flattened["port_pools"][0]["name"] == "fabric"
 
 
 def test_node_sort_key_matches_port_mapping_natural_order():

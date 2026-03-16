@@ -94,24 +94,24 @@ class PortLayoutConfig:
 
 
 @dataclass(frozen=True)
-class LayerConfig:
+class PortPoolConfig:
     index: int
     name: str
-    placement: str
-    nodes_per_group: int
     port_layout: PortLayoutConfig
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "placement": self.placement,
-            "nodes_per_group": self.nodes_per_group,
-            "port_layout": self.port_layout.to_dict(),
+            **self.port_layout.to_dict(),
         }
 
     @property
     def total_lane_units(self) -> int:
         return self.port_layout.total_lane_units
+
+    @property
+    def base_lane_bandwidth_gb(self) -> float:
+        return self.port_layout.base_lane_bandwidth_gb
 
     @property
     def supported_port_bandwidths_gb(self) -> tuple[float, ...]:
@@ -122,11 +122,99 @@ class LayerConfig:
 
 
 @dataclass(frozen=True)
+class LayerConfig:
+    index: int
+    name: str
+    placement: str
+    nodes_per_group: int
+    port_pools: tuple[PortPoolConfig, ...]
+    _port_pools_by_name: Mapping[str, PortPoolConfig] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _port_pool_offsets: Mapping[str, int] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        port_pools_by_name: dict[str, PortPoolConfig] = {}
+        port_pool_offsets: dict[str, int] = {}
+        lane_offset = 0
+        for port_pool in self.port_pools:
+            normalized_name = normalize_identifier(port_pool.name)
+            port_pools_by_name[normalized_name] = port_pool
+            port_pool_offsets[normalized_name] = lane_offset
+            lane_offset += port_pool.total_lane_units
+        object.__setattr__(self, "_port_pools_by_name", port_pools_by_name)
+        object.__setattr__(self, "_port_pool_offsets", port_pool_offsets)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "placement": self.placement,
+            "nodes_per_group": self.nodes_per_group,
+            "port_pools": [port_pool.to_dict() for port_pool in self.port_pools],
+        }
+
+    @property
+    def total_lane_units(self) -> int:
+        return sum(port_pool.total_lane_units for port_pool in self.port_pools)
+
+    @property
+    def supported_port_bandwidths_gb(self) -> tuple[float, ...]:
+        seen_bandwidths: set[Decimal] = set()
+        ordered_bandwidths: list[float] = []
+        for port_pool in self.port_pools:
+            for bandwidth_gb in port_pool.supported_port_bandwidths_gb:
+                normalized_bandwidth = bandwidth_decimal(bandwidth_gb)
+                if normalized_bandwidth in seen_bandwidths:
+                    continue
+                seen_bandwidths.add(normalized_bandwidth)
+                ordered_bandwidths.append(bandwidth_gb)
+        return tuple(ordered_bandwidths)
+
+    @property
+    def port_pool_names(self) -> tuple[str, ...]:
+        return tuple(port_pool.name for port_pool in self.port_pools)
+
+    def port_pool(self, pool_name: str) -> PortPoolConfig:
+        normalized_pool_name = normalize_identifier(pool_name)
+        try:
+            return self._port_pools_by_name[normalized_pool_name]
+        except KeyError as exc:
+            raise KeyError(pool_name) from exc
+
+    def has_port_pool(self, pool_name: str) -> bool:
+        return normalize_identifier(pool_name) in self._port_pools_by_name
+
+    def lane_units_for_pool_bandwidth(
+        self,
+        pool_name: str,
+        bandwidth_gb: float,
+    ) -> int | None:
+        try:
+            return self.port_pool(pool_name).lane_units_for_bandwidth(bandwidth_gb)
+        except KeyError:
+            return None
+
+    def port_pool_offset(self, pool_name: str) -> int:
+        normalized_pool_name = normalize_identifier(pool_name)
+        try:
+            return self._port_pool_offsets[normalized_pool_name]
+        except KeyError as exc:
+            raise KeyError(pool_name) from exc
+
+
+@dataclass(frozen=True)
 class LinkConfig:
     index: int
     from_layer: str
     to_layer: str
     policy: str
+    port_pool: str
     cables_per_pair: int
     cable_bandwidth_gb: float
 
@@ -135,6 +223,7 @@ class LinkConfig:
             "from": self.from_layer,
             "to": self.to_layer,
             "policy": self.policy,
+            "port_pool": self.port_pool,
             "cables_per_pair": self.cables_per_pair,
             "cable_bandwidth_gb": self.cable_bandwidth_gb,
         }
@@ -158,42 +247,42 @@ class FabricConfig:
 
 
 @dataclass(frozen=True)
-class FabricPortLayoutConfig:
+class FabricPortPoolsConfig:
     name: str
-    port_layout: PortLayoutConfig
+    port_pools: tuple[PortPoolConfig, ...]
 
-    def to_dict(self) -> dict[str, Any]:
-        return self.port_layout.to_dict()
+    def to_dict(self) -> list[dict[str, Any]]:
+        return [port_pool.to_dict() for port_pool in self.port_pools]
 
 
 @dataclass(frozen=True)
 class GpuNodesConfig:
     total_nodes: int
-    fabric_port_layouts: tuple[FabricPortLayoutConfig, ...]
+    fabric_port_pools: tuple[FabricPortPoolsConfig, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "total_nodes": self.total_nodes,
-            "fabric_port_layouts": {
-                fabric_port_layout.name: fabric_port_layout.to_dict()
-                for fabric_port_layout in self.fabric_port_layouts
+            "fabric_port_pools": {
+                fabric_port_pools.name: fabric_port_pools.to_dict()
+                for fabric_port_pools in self.fabric_port_pools
             },
         }
 
-    def port_layout_for_fabric(self, fabric_name: str) -> PortLayoutConfig:
+    def port_pools_for_fabric(self, fabric_name: str) -> tuple[PortPoolConfig, ...]:
         normalized_fabric_name = normalize_identifier(fabric_name)
-        for fabric_port_layout in self.fabric_port_layouts:
-            if normalize_identifier(fabric_port_layout.name) == normalized_fabric_name:
-                return fabric_port_layout.port_layout
+        for fabric_port_pools in self.fabric_port_pools:
+            if normalize_identifier(fabric_port_pools.name) == normalized_fabric_name:
+                return fabric_port_pools.port_pools
         raise InvalidTopologyConfig(
-            "gpu_nodes.fabric_port_layouts must define an entry for fabric "
+            "gpu_nodes.fabric_port_pools must define an entry for fabric "
             f"{fabric_name!r}."
         )
 
     @property
     def fabric_names(self) -> tuple[str, ...]:
         return tuple(
-            fabric_port_layout.name for fabric_port_layout in self.fabric_port_layouts
+            fabric_port_pools.name for fabric_port_pools in self.fabric_port_pools
         )
 
 
@@ -211,6 +300,7 @@ class EffectiveFabricConfig:
             if layer.name == layer_ref:
                 return layer
         raise KeyError(layer_ref)
+
 
 @dataclass(frozen=True)
 class TopologyConfig(Mapping[str, Any]):
@@ -357,7 +447,7 @@ class TopologyConfig(Mapping[str, Any]):
             name=GPU_NODES_LAYER_NAME,
             placement=placement,
             nodes_per_group=nodes_per_group,
-            port_layout=self.gpu_nodes.port_layout_for_fabric(fabric_name),
+            port_pools=self.gpu_nodes.port_pools_for_fabric(fabric_name),
         )
 
     def iter_fabrics(self) -> tuple[EffectiveFabricConfig, ...]:

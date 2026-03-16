@@ -10,10 +10,11 @@ from topology_generator.config_identifiers import (
     build_global_node_id,
     build_group_label_node_id,
     build_grouped_node_id,
+    normalize_identifier,
 )
 from topology_generator.config_types import (
     LayerConfig,
-    PortLayoutConfig,
+    PortPoolConfig,
     TopologyConfig,
     ensure_topology_config,
 )
@@ -36,24 +37,54 @@ class ExpandedNode:
     group_label: str | None
     node_ordinal: int
     physical_node_ordinal: int
-    port_layout: PortLayoutConfig
+    port_pools: tuple[PortPoolConfig, ...]
     fabric_name: str | None
     is_shared_gpu_node: bool = False
 
     @property
-    def total_lane_units(self) -> int:
-        return self.port_layout.total_lane_units
-
-    @property
-    def base_lane_bandwidth_gb(self) -> float:
-        return self.port_layout.base_lane_bandwidth_gb
-
-    @property
     def supported_port_bandwidths_gb(self) -> tuple[float, ...]:
-        return self.port_layout.supported_port_bandwidths_gb
+        seen_bandwidths: list[float] = []
+        for port_pool in self.port_pools:
+            for bandwidth_gb in port_pool.supported_port_bandwidths_gb:
+                if bandwidth_gb in seen_bandwidths:
+                    continue
+                seen_bandwidths.append(bandwidth_gb)
+        return tuple(seen_bandwidths)
 
-    def lane_units_for_bandwidth(self, bandwidth_gb: float) -> int | None:
-        return self.port_layout.lane_units_for_bandwidth(bandwidth_gb)
+    def port_pool(self, pool_name: str) -> PortPoolConfig:
+        for port_pool in self.port_pools:
+            if port_pool.name == pool_name:
+                return port_pool
+        normalized_pool_name = normalize_identifier(pool_name)
+        for port_pool in self.port_pools:
+            if normalize_identifier(port_pool.name) == normalized_pool_name:
+                return port_pool
+        raise KeyError(pool_name)
+
+    def port_pool_offset(self, pool_name: str) -> int:
+        offset = 0
+        for port_pool in self.port_pools:
+            if port_pool.name == pool_name:
+                return offset
+            offset += port_pool.total_lane_units
+
+        normalized_pool_name = normalize_identifier(pool_name)
+        offset = 0
+        for port_pool in self.port_pools:
+            if normalize_identifier(port_pool.name) == normalized_pool_name:
+                return offset
+            offset += port_pool.total_lane_units
+        raise KeyError(pool_name)
+
+    def lane_units_for_pool_bandwidth(
+        self,
+        pool_name: str,
+        bandwidth_gb: float,
+    ) -> int | None:
+        try:
+            return self.port_pool(pool_name).lane_units_for_bandwidth(bandwidth_gb)
+        except KeyError:
+            return None
 
 
 @dataclass(frozen=True)
@@ -63,6 +94,7 @@ class ExpandedLinkBundle:
     source_graph_node_id: str
     target_graph_node_id: str
     fabric_name: str | None
+    port_pool: str
     num_cables: int
     cable_bandwidth_gb: float
     source_lane_units_per_cable: int
@@ -145,16 +177,19 @@ def expand_topology(config: TopologyConfig | dict[str, object]) -> ExpandedTopol
 
             lower_layer = fabric.layer(link.from_layer)
             upper_layer = fabric.layer(link.to_layer)
-            source_lane_units_per_cable = lower_layer.lane_units_for_bandwidth(
-                link.cable_bandwidth_gb
+            source_lane_units_per_cable = lower_layer.lane_units_for_pool_bandwidth(
+                link.port_pool,
+                link.cable_bandwidth_gb,
             )
-            target_lane_units_per_cable = upper_layer.lane_units_for_bandwidth(
-                link.cable_bandwidth_gb
+            target_lane_units_per_cable = upper_layer.lane_units_for_pool_bandwidth(
+                link.port_pool,
+                link.cable_bandwidth_gb,
             )
             if source_lane_units_per_cable is None or target_lane_units_per_cable is None:
                 raise ValueError(
                     f"Unsupported cable bandwidth {link.cable_bandwidth_gb:g} GB/s for "
-                    f"link {link.from_layer!r} -> {link.to_layer!r}."
+                    f"link {link.from_layer!r} -> {link.to_layer!r} in port pool "
+                    f"{link.port_pool!r}."
                 )
 
             if link.policy == "same_scope_full_mesh":
@@ -169,6 +204,7 @@ def expand_topology(config: TopologyConfig | dict[str, object]) -> ExpandedTopol
                             scope_layer_nodes[(fabric_key, lower_layer.name, scope_key)],
                             scope_layer_nodes[(fabric_key, upper_layer.name, scope_key)],
                             fabric.name,
+                            link.port_pool,
                             link.cables_per_pair,
                             link.cable_bandwidth_gb,
                             source_lane_units_per_cable,
@@ -195,6 +231,7 @@ def expand_topology(config: TopologyConfig | dict[str, object]) -> ExpandedTopol
                                 (fabric_key, upper_layer.name, ancestor_scope_key)
                             ],
                             fabric.name,
+                            link.port_pool,
                             link.cables_per_pair,
                             link.cable_bandwidth_gb,
                             source_lane_units_per_cable,
@@ -216,6 +253,7 @@ def expand_topology(config: TopologyConfig | dict[str, object]) -> ExpandedTopol
                             scope_layer_nodes[(fabric_key, lower_layer.name, scope_key)],
                             global_nodes,
                             fabric.name,
+                            link.port_pool,
                             link.cables_per_pair,
                             link.cable_bandwidth_gb,
                             source_lane_units_per_cable,
@@ -229,6 +267,7 @@ def expand_topology(config: TopologyConfig | dict[str, object]) -> ExpandedTopol
                     layer_nodes[(fabric_key, lower_layer.name)],
                     layer_nodes[(fabric_key, upper_layer.name)],
                     fabric.name,
+                    link.port_pool,
                     link.cables_per_pair,
                     link.cable_bandwidth_gb,
                     source_lane_units_per_cable,
@@ -354,7 +393,7 @@ def _build_expanded_node(
         group_label=group_label,
         node_ordinal=node_ordinal,
         physical_node_ordinal=physical_node_ordinal,
-        port_layout=layer.port_layout,
+        port_pools=layer.port_pools,
         fabric_name=fabric_name,
         is_shared_gpu_node=is_shared_gpu_node,
     )
@@ -396,6 +435,7 @@ def _full_mesh_link_bundles(
     source_nodes: list[ExpandedNode],
     target_nodes: list[ExpandedNode],
     fabric_name: str | None,
+    port_pool: str,
     num_cables: int,
     cable_bandwidth_gb: float,
     source_lane_units_per_cable: int,
@@ -408,6 +448,7 @@ def _full_mesh_link_bundles(
             source_graph_node_id=source.graph_node_id,
             target_graph_node_id=target.graph_node_id,
             fabric_name=fabric_name,
+            port_pool=port_pool,
             num_cables=num_cables,
             cable_bandwidth_gb=cable_bandwidth_gb,
             source_lane_units_per_cable=source_lane_units_per_cable,

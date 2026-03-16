@@ -88,8 +88,9 @@ Topology shape:
 
 Port model:
 
-- `gpu_nodes` capacity is declared once under `gpu_nodes.fabric_port_layouts`
+- `gpu_nodes` capacity is declared once under `gpu_nodes.fabric_port_pools`
 - backend, frontend, and OOB each consume their own independent lane budget on the same GPU nodes
+- the backend pool is named `IB` and the frontend pool is named `Eth`
 - backend and frontend rows export pod labels, while OOB rows export resolved rack labels
 - the merged Excel output includes a `fabric` column so rows remain attributable after concatenation
 
@@ -122,9 +123,10 @@ Topology shape:
 
 Port model:
 
-- `gpu_nodes` exposes `8 x 400G` to `backend`
-- `gpu_nodes` exposes `2 x 400G` to `frontend`
-- frontend leaves use the same `128 x 400G` lane budget as the backend switching layers
+- `gpu_nodes` exposes `8 x 400G` to `backend` through pool `IB`
+- `gpu_nodes` exposes `2 x 400G` to `frontend` through pool `Eth`
+- backend switching layers use pool `IB`
+- frontend switching layers use pool `Eth`
 - each frontend leaf receives 64 GPU downlinks and 32 spine uplinks, for 96 total lane units
 - each frontend global spine receives 128 total lane units across all pods
 
@@ -144,7 +146,7 @@ Expected result:
 - `topology_backend.png`
 - `topology_frontend.png`
 - `topology_oob.png`
-- 32,384 rows in `port_mapping.xlsx`
+- 32,064 rows in `port_mapping.xlsx`
 
 Topology shape:
 
@@ -157,9 +159,13 @@ Topology shape:
 
 Port model:
 
-- each GPU exposes `3 x 1G` only to the `OOB` fabric
-- each OOB leaf receives `8 * 3 = 24` GPU downlinks and `4 x 1G` uplinks, using `28 / 48` total 1G lanes
-- OOB uses `4` pod-scoped spines per pod and `2` global cores
+- backend uses pool `IB` and frontend uses pool `Eth`
+- each GPU exposes `3 x 1G` only to the `OOB` fabric through pool `1G`
+- each OOB leaf exposes independent `48 x 1G` and `4 x 100G` pools named `1G` and `100G`
+- each OOB spine exposes independent `48 x 1G` and `4 x 100G` pools named `1G` and `100G`
+- each OOB leaf receives `8 * 3 = 24` GPU downlinks and `2 x 1G` spine uplinks, using `26 / 48` total 1G lanes
+- OOB uses `2` pod-scoped spines per pod and `2` global cores
+- each OOB core exposes `32 x 100G` through pool `100G`
 - each rack leaf connects only to pod-local OOB spines through `to_ancestor_full_mesh`
-- each pod OOB spine uplinks to both global cores through `to_global_full_mesh`
+- each pod OOB spine uplinks to both global cores through `1 x 100G` links
 - OOB rows in the merged Excel output use resolved rack labels such as `pod_1_rack_1`

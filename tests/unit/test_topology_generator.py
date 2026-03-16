@@ -32,19 +32,20 @@ def test_generate_topology_builds_expected_grouped_graph(sample_config):
         ("pod_2_leaf_1", "spine_2"),
     ]
 
-    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["source_ports"] == [1]
-    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["target_ports"] == [1]
-    assert graph.edges["pod_1_leaf_1", "spine_1"]["source_ports"] == [3]
-    assert graph.edges["pod_1_leaf_1", "spine_1"]["target_ports"] == [1]
-    assert graph.edges["pod_2_leaf_1", "spine_2"]["source_ports"] == [4]
-    assert graph.edges["pod_2_leaf_1", "spine_2"]["target_ports"] == [2]
+    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["link_bundles"][0]["source_ports"] == [1]
+    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["link_bundles"][0]["target_ports"] == [1]
+    assert graph.edges["pod_1_leaf_1", "spine_1"]["link_bundles"][0]["source_ports"] == [3]
+    assert graph.edges["pod_1_leaf_1", "spine_1"]["link_bundles"][0]["target_ports"] == [1]
+    assert graph.edges["pod_2_leaf_1", "spine_2"]["link_bundles"][0]["source_ports"] == [4]
+    assert graph.edges["pod_2_leaf_1", "spine_2"]["link_bundles"][0]["target_ports"] == [2]
+    assert graph.edges["pod_1_compute_1", "pod_1_leaf_1"]["link_bundles"][0]["port_pool"] == "fabric"
 
     assert graph.nodes["pod_1_compute_1"]["used_bandwidth_gb"] == 100
-    assert graph.nodes["pod_1_compute_1"]["used_lane_units"] == 1
+    assert graph.nodes["pod_1_compute_1"]["port_pools"][0]["used_lane_units"] == 1
     assert graph.nodes["pod_1_leaf_1"]["used_bandwidth_gb"] == 400
-    assert graph.nodes["pod_1_leaf_1"]["used_lane_units"] == 4
+    assert graph.nodes["pod_1_leaf_1"]["port_pools"][0]["used_lane_units"] == 4
     assert graph.nodes["spine_1"]["used_bandwidth_gb"] == 200
-    assert graph.nodes["spine_1"]["used_lane_units"] == 2
+    assert graph.nodes["spine_1"]["port_pools"][0]["used_lane_units"] == 2
 
 
 def test_generate_topology_accepts_validated_config(sample_config):
@@ -68,14 +69,152 @@ def test_generate_topology_allocates_contiguous_lane_units_for_mixed_speed_links
 ):
     graph = generate_topology(mixed_speed_config)
 
-    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["source_ports"] == [3]
-    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["target_ports"] == [1]
-    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["source_lane_units_per_cable"] == 2
-    assert graph.edges["pod_1_leaf_switch_1", "spine_1"]["target_lane_units_per_cable"] == 2
+    bundle = graph.edges["pod_1_leaf_switch_1", "spine_1"]["link_bundles"][0]
+    assert bundle["source_ports"] == [3]
+    assert bundle["target_ports"] == [1]
+    assert bundle["source_lane_units_per_cable"] == 2
+    assert bundle["target_lane_units_per_cable"] == 2
     assert graph.nodes["pod_1_leaf_switch_1"]["supported_port_bandwidths_gb"] == (
         400.0,
         800.0,
     )
+
+
+def test_generate_topology_uses_pool_offsets_for_global_port_numbering():
+    config = {
+        "groups": [],
+        "layers": [
+            {
+                "name": "leaf",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    {
+                        "name": "fabric",
+                        "base_lane_bandwidth_gb": 400,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 400, "lane_units": 1}],
+                    },
+                    {
+                        "name": "mgmt",
+                        "base_lane_bandwidth_gb": 100,
+                        "total_lane_units": 4,
+                        "supported_port_modes": [{"port_bandwidth_gb": 100, "lane_units": 1}],
+                    },
+                ],
+            },
+            {
+                "name": "spine",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    {
+                        "name": "fabric",
+                        "base_lane_bandwidth_gb": 400,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 400, "lane_units": 1}],
+                    },
+                    {
+                        "name": "mgmt",
+                        "base_lane_bandwidth_gb": 100,
+                        "total_lane_units": 4,
+                        "supported_port_modes": [{"port_bandwidth_gb": 100, "lane_units": 1}],
+                    },
+                ],
+            },
+        ],
+        "links": [
+            {
+                "from": "leaf",
+                "to": "spine",
+                "policy": "global_full_mesh",
+                "port_pool": "mgmt",
+                "cables_per_pair": 2,
+                "cable_bandwidth_gb": 100,
+            }
+        ],
+    }
+
+    graph = generate_topology(config)
+
+    bundle = graph.edges["leaf_1", "spine_1"]["link_bundles"][0]
+    assert bundle["source_ports"] == [3, 4]
+    assert bundle["target_ports"] == [3, 4]
+    assert graph.nodes["leaf_1"]["port_pools"][1]["port_offset"] == 2
+
+
+def test_generate_topology_coalesces_multiple_link_bundles_on_one_edge():
+    config = {
+        "groups": [],
+        "layers": [
+            {
+                "name": "leaf",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    {
+                        "name": "fabric",
+                        "base_lane_bandwidth_gb": 400,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 400, "lane_units": 1}],
+                    },
+                    {
+                        "name": "mgmt",
+                        "base_lane_bandwidth_gb": 100,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 100, "lane_units": 1}],
+                    },
+                ],
+            },
+            {
+                "name": "spine",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    {
+                        "name": "fabric",
+                        "base_lane_bandwidth_gb": 400,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 400, "lane_units": 1}],
+                    },
+                    {
+                        "name": "mgmt",
+                        "base_lane_bandwidth_gb": 100,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 100, "lane_units": 1}],
+                    },
+                ],
+            },
+        ],
+        "links": [
+            {
+                "from": "leaf",
+                "to": "spine",
+                "policy": "global_full_mesh",
+                "port_pool": "fabric",
+                "cables_per_pair": 1,
+                "cable_bandwidth_gb": 400,
+            },
+            {
+                "from": "leaf",
+                "to": "spine",
+                "policy": "global_full_mesh",
+                "port_pool": "mgmt",
+                "cables_per_pair": 1,
+                "cable_bandwidth_gb": 100,
+            },
+        ],
+    }
+
+    graph = generate_topology(config)
+
+    assert graph.number_of_edges() == 1
+    bundles = graph.edges["leaf_1", "spine_1"]["link_bundles"]
+    assert [bundle["port_pool"] for bundle in bundles] == ["fabric", "mgmt"]
+    assert bundles[0]["source_ports"] == [1]
+    assert bundles[1]["source_ports"] == [3]
+    assert bundles[0]["target_ports"] == [1]
+    assert bundles[1]["target_ports"] == [3]
 
 
 def test_generate_topology_merges_gpu_nodes_across_fabrics(multi_fabric_config):
@@ -98,9 +237,10 @@ def test_get_fabric_view_flattens_shared_gpu_node_metrics(multi_fabric_config):
 
     backend_view = get_fabric_view(graph, "backend")
 
-    assert backend_view.nodes["gpu_nodes_1"]["used_lane_units"] == 1
-    assert backend_view.nodes["gpu_nodes_1"]["total_lane_units"] == 1
+    assert backend_view.nodes["gpu_nodes_1"]["port_pools"][0]["used_lane_units"] == 1
+    assert backend_view.nodes["gpu_nodes_1"]["port_pools"][0]["total_lane_units"] == 1
     assert backend_view.nodes["gpu_nodes_1"]["group_label"] == "pod_1"
+    assert backend_view.nodes["gpu_nodes_1"]["port_pools"][0]["name"] == "fabric"
     assert {frozenset(edge) for edge in backend_view.edges()} == {
         frozenset(("backend__pod_1_leaf_1", "backend__spine_1")),
         frozenset(("gpu_nodes_1", "backend__pod_1_leaf_1")),

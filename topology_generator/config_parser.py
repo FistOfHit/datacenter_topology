@@ -12,7 +12,7 @@ from topology_generator.config_identifiers import (
 )
 from topology_generator.config_types import (
     FabricConfig,
-    FabricPortLayoutConfig,
+    FabricPortPoolsConfig,
     GpuNodesConfig,
     GroupConfig,
     GroupingConfig,
@@ -21,6 +21,7 @@ from topology_generator.config_types import (
     LinkConfig,
     PortLayoutConfig,
     PortModeConfig,
+    PortPoolConfig,
     TopologyConfig,
 )
 
@@ -138,35 +139,40 @@ def _parse_gpu_nodes(raw_gpu_nodes: Any) -> GpuNodesConfig:
             f"{path}.nodes_per_group is no longer supported; use {path}.total_nodes "
             "and top-level groupings[*].members_per_group instead."
         )
-
-    raw_fabric_port_layouts = raw_gpu_nodes.get("fabric_port_layouts")
-    if not isinstance(raw_fabric_port_layouts, Mapping) or not raw_fabric_port_layouts:
-        raise InvalidTopologyConfig(f"{path}.fabric_port_layouts must be a non-empty mapping.")
-
-    fabric_port_layout_names = list(raw_fabric_port_layouts)
-    if not all(isinstance(name, str) and name.strip() for name in fabric_port_layout_names):
+    if "fabric_port_layouts" in raw_gpu_nodes:
         raise InvalidTopologyConfig(
-            f"{path}.fabric_port_layouts keys must be non-empty strings."
+            f"{path}.fabric_port_layouts is no longer supported; use "
+            f"{path}.fabric_port_pools instead."
+        )
+
+    raw_fabric_port_pools = raw_gpu_nodes.get("fabric_port_pools")
+    if not isinstance(raw_fabric_port_pools, Mapping) or not raw_fabric_port_pools:
+        raise InvalidTopologyConfig(f"{path}.fabric_port_pools must be a non-empty mapping.")
+
+    fabric_port_pool_names = list(raw_fabric_port_pools)
+    if not all(isinstance(name, str) and name.strip() for name in fabric_port_pool_names):
+        raise InvalidTopologyConfig(
+            f"{path}.fabric_port_pools keys must be non-empty strings."
         )
     _validate_identifier_uniqueness(
-        [str(name).strip() for name in fabric_port_layout_names],
-        f"{path}.fabric_port_layouts keys",
+        [str(name).strip() for name in fabric_port_pool_names],
+        f"{path}.fabric_port_pools keys",
     )
 
-    fabric_port_layouts = tuple(
-        FabricPortLayoutConfig(
+    fabric_port_pools = tuple(
+        FabricPortPoolsConfig(
             name=str(fabric_name).strip(),
-            port_layout=_parse_port_layout(
-                raw_port_layout,
-                f"{path}.fabric_port_layouts[{fabric_name!r}]",
+            port_pools=_parse_port_pools(
+                raw_port_pools,
+                f"{path}.fabric_port_pools[{fabric_name!r}]",
             ),
         )
-        for fabric_name, raw_port_layout in raw_fabric_port_layouts.items()
+        for fabric_name, raw_port_pools in raw_fabric_port_pools.items()
     )
 
     return GpuNodesConfig(
         total_nodes=_require_positive_int(raw_gpu_nodes, "total_nodes", path),
-        fabric_port_layouts=fabric_port_layouts,
+        fabric_port_pools=fabric_port_pools,
     )
 
 
@@ -237,7 +243,11 @@ def _parse_layer(raw_layer: Any, index: int, path: str) -> LayerConfig:
     if legacy_keys:
         raise InvalidTopologyConfig(
             f"{path} uses legacy port fields {legacy_keys!r}; replace them with a "
-            "port_layout block."
+            "port_pools block."
+        )
+    if "port_layout" in raw_layer:
+        raise InvalidTopologyConfig(
+            f"{path}.port_layout is no longer supported; use port_pools instead."
         )
 
     placement = _required_string(raw_layer, "placement", path)
@@ -252,7 +262,36 @@ def _parse_layer(raw_layer: Any, index: int, path: str) -> LayerConfig:
         name=_required_name(raw_layer, path),
         placement=placement,
         nodes_per_group=_require_positive_int(raw_layer, "nodes_per_group", path),
-        port_layout=_parse_port_layout(raw_layer.get("port_layout"), f"{path}.port_layout"),
+        port_pools=_parse_port_pools(raw_layer.get("port_pools"), f"{path}.port_pools"),
+    )
+
+
+def _parse_port_pools(raw_port_pools: Any, path: str) -> tuple[PortPoolConfig, ...]:
+    if not isinstance(raw_port_pools, Sequence) or isinstance(raw_port_pools, (str, bytes)):
+        raise InvalidTopologyConfig(f"{path} must be a list of pool mappings.")
+    if not raw_port_pools:
+        raise InvalidTopologyConfig(f"{path} must not be empty.")
+
+    port_pools = tuple(
+        _parse_port_pool(raw_port_pool, index, f"{path}[{index}]")
+        for index, raw_port_pool in enumerate(raw_port_pools)
+    )
+    _validate_identifier_uniqueness(
+        [port_pool.name for port_pool in port_pools],
+        f"{path} names",
+    )
+    return port_pools
+
+
+def _parse_port_pool(raw_port_pool: Any, index: int, path: str) -> PortPoolConfig:
+    if not isinstance(raw_port_pool, Mapping):
+        raise InvalidTopologyConfig(f"{path} must be a mapping.")
+
+    port_layout = _parse_port_layout(raw_port_pool, path)
+    return PortPoolConfig(
+        index=index,
+        name=_required_name(raw_port_pool, path),
+        port_layout=port_layout,
     )
 
 
@@ -375,6 +414,7 @@ def _parse_link(raw_link: Any, index: int, path: str) -> LinkConfig:
         from_layer=_required_string(raw_link, "from", path),
         to_layer=_required_string(raw_link, "to", path),
         policy=policy,
+        port_pool=_required_string(raw_link, "port_pool", path),
         cables_per_pair=cables_per_pair,
         cable_bandwidth_gb=cable_bandwidth_gb,
     )

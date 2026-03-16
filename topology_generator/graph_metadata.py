@@ -12,6 +12,26 @@ class GraphAttrs(TypedDict, total=False):
     fabric_name: str
 
 
+class PortPoolAttrs(TypedDict):
+    name: str
+    total_lane_units: int
+    used_lane_units: int
+    port_offset: int
+    base_lane_bandwidth_gb: float
+    supported_port_bandwidths_gb: tuple[float, ...]
+
+
+class LinkBundleAttrs(TypedDict, total=False):
+    port_pool: str
+    source_ports: list[int]
+    target_ports: list[int]
+    num_cables: int
+    cable_bandwidth_gb: float
+    source_lane_units_per_cable: int
+    target_lane_units_per_cable: int
+    fabric: str | None
+
+
 class NodeAttrs(TypedDict, total=False):
     layer_index: int
     layer_name: str
@@ -30,23 +50,16 @@ class NodeAttrs(TypedDict, total=False):
     aggregate_bandwidth_gb: float
     aggregate_bandwidth_down: float
     aggregate_bandwidth_up: float
-    total_lane_units: int
-    base_lane_bandwidth_gb: float
     supported_port_bandwidths_gb: tuple[float, ...]
     used_bandwidth_gb: float
-    used_lane_units: int
+    port_pools: tuple[PortPoolAttrs, ...]
     fabric: str | None
     is_shared_gpu_node: bool
     fabric_metrics: dict[str, "NodeAttrs"]
 
 
 class EdgeAttrs(TypedDict, total=False):
-    source_ports: list[int]
-    target_ports: list[int]
-    num_cables: int
-    cable_bandwidth_gb: float
-    source_lane_units_per_cable: int
-    target_lane_units_per_cable: int
+    link_bundles: tuple[LinkBundleAttrs, ...]
     fabric: str | None
 
 
@@ -123,18 +136,49 @@ def node_group_label(attrs: NodeAttrs | dict[str, object]) -> str:
     return str(label or "global")
 
 
-def cable_bandwidth_gb(attrs: EdgeAttrs | dict[str, object]) -> float:
+def link_bundle_attrs(
+    attrs: EdgeAttrs | dict[str, object],
+) -> tuple[LinkBundleAttrs, ...]:
+    value = attrs.get("link_bundles")
+    if isinstance(value, tuple):
+        return cast(tuple[LinkBundleAttrs, ...], value)
+
+    if "cable_bandwidth_gb" in attrs or "num_cables" in attrs:
+        return (cast(LinkBundleAttrs, attrs),)
+
+    return ()
+
+
+def cable_bandwidth_gb(attrs: LinkBundleAttrs | dict[str, object]) -> float:
     value = attrs.get("cable_bandwidth_gb", 0.0)
     if not isinstance(value, (int, float)):
         raise ValueError("Edge attribute 'cable_bandwidth_gb' must be numeric.")
     return float(value)
 
 
-def cable_count(attrs: EdgeAttrs | dict[str, object]) -> int:
+def cable_count(attrs: LinkBundleAttrs | dict[str, object]) -> int:
     value = attrs.get("num_cables", 0)
     if not isinstance(value, int):
         raise ValueError("Edge attribute 'num_cables' must be an integer.")
     return value
+
+
+def total_edge_cable_count(attrs: EdgeAttrs | dict[str, object]) -> int:
+    return sum(cable_count(bundle) for bundle in link_bundle_attrs(attrs))
+
+
+def total_edge_bandwidth_gb(attrs: EdgeAttrs | dict[str, object]) -> float:
+    return sum(
+        cable_count(bundle) * cable_bandwidth_gb(bundle)
+        for bundle in link_bundle_attrs(attrs)
+    )
+
+
+def port_pool_attrs(attrs: NodeAttrs | dict[str, object]) -> tuple[PortPoolAttrs, ...]:
+    value = attrs.get("port_pools", ())
+    if not isinstance(value, tuple):
+        raise ValueError("Node attribute 'port_pools' must be a tuple.")
+    return cast(tuple[PortPoolAttrs, ...], value)
 
 
 def natural_sort_key(value: str) -> tuple[object, ...]:

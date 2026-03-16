@@ -19,7 +19,7 @@ EXAMPLE_EXPECTATIONS = {
             "topology_frontend.png",
             "topology_oob.png",
         },
-        "row_count": 32384,
+        "row_count": 32064,
         "has_fabric_column": True,
     },
     "multi_fabric_small.yaml": {

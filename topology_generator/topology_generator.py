@@ -11,10 +11,13 @@ from topology_generator.config_types import (
 )
 from topology_generator.expander import ExpandedNode, ExpandedTopology, expand_topology
 from topology_generator.graph_metadata import (
+    LinkBundleAttrs,
+    PortPoolAttrs,
     fabric_name_for_edge,
     fabric_names,
     flatten_node_attrs_for_fabric,
     graph_attrs,
+    link_bundle_attrs,
     is_multi_fabric_graph as _is_multi_fabric_graph,
 )
 from topology_generator.validator import NodeUsage, validate_expanded_topology
@@ -61,6 +64,7 @@ def generate_topology(config: Mapping[str, object] | TopologyConfig) -> nx.Graph
 
     logger.info("Network topology generation completed")
     return graph
+
 
 def get_fabric_names(graph: nx.Graph) -> tuple[str, ...]:
     return fabric_names(graph)
@@ -151,6 +155,7 @@ def _add_expanded_nodes(
 
 
 def _build_node_attrs(node: ExpandedNode, usage: NodeUsage) -> dict[str, Any]:
+    port_pools = _build_port_pool_attrs(node, usage)
     return {
         "layer_index": node.layer_index,
         "layer_name": node.layer_name,
@@ -169,54 +174,112 @@ def _build_node_attrs(node: ExpandedNode, usage: NodeUsage) -> dict[str, Any]:
         "aggregate_bandwidth_gb": usage.total_bandwidth_gb,
         "aggregate_bandwidth_down": usage.bandwidth_down_gb,
         "aggregate_bandwidth_up": usage.bandwidth_up_gb,
-        "total_lane_units": node.total_lane_units,
-        "base_lane_bandwidth_gb": node.base_lane_bandwidth_gb,
+        "port_pools": port_pools,
         "supported_port_bandwidths_gb": node.supported_port_bandwidths_gb,
         "used_bandwidth_gb": usage.total_bandwidth_gb,
-        "used_lane_units": usage.required_lane_units,
         "fabric": node.fabric_name,
         "is_shared_gpu_node": node.is_shared_gpu_node,
     }
 
 
+def _build_port_pool_attrs(
+    node: ExpandedNode,
+    usage: NodeUsage,
+) -> tuple[PortPoolAttrs, ...]:
+    pool_attrs: list[PortPoolAttrs] = []
+    lane_offset = 0
+    for port_pool in node.port_pools:
+        used_lane_units = usage.required_lane_units_for_pool(port_pool.name)
+        pool_attrs.append(
+            {
+                "name": port_pool.name,
+                "total_lane_units": port_pool.total_lane_units,
+                "used_lane_units": used_lane_units,
+                "port_offset": lane_offset,
+                "base_lane_bandwidth_gb": port_pool.base_lane_bandwidth_gb,
+                "supported_port_bandwidths_gb": port_pool.supported_port_bandwidths_gb,
+            }
+        )
+        lane_offset += port_pool.total_lane_units
+    return tuple(pool_attrs)
+
+
 def _add_expanded_links(graph: nx.Graph, expanded_topology: ExpandedTopology) -> None:
     node_lookup = {node.node_id: node for node in expanded_topology.nodes}
-    allocators: dict[tuple[str, str | None], ContiguousLaneAllocator] = {}
+    allocators: dict[tuple[str, str | None, str], ContiguousLaneAllocator] = {}
     for node in expanded_topology.nodes:
-        allocator_key = _allocator_key(node)
-        if allocator_key not in allocators:
-            allocators[allocator_key] = ContiguousLaneAllocator(node.total_lane_units)
+        for port_pool in node.port_pools:
+            allocator_key = _allocator_key(node, port_pool.name)
+            if allocator_key not in allocators:
+                allocators[allocator_key] = ContiguousLaneAllocator(port_pool.total_lane_units)
 
     for link in expanded_topology.links:
         source_node = node_lookup[link.source_node_id]
         target_node = node_lookup[link.target_node_id]
+        source_port_offset = source_node.port_pool_offset(link.port_pool)
+        target_port_offset = target_node.port_pool_offset(link.port_pool)
         source_ports = [
-            allocators[_allocator_key(source_node)].allocate(
+            source_port_offset
+            + allocators[_allocator_key(source_node, link.port_pool)].allocate(
                 link.source_lane_units_per_cable
             )
             for _ in range(link.num_cables)
         ]
         target_ports = [
-            allocators[_allocator_key(target_node)].allocate(
+            target_port_offset
+            + allocators[_allocator_key(target_node, link.port_pool)].allocate(
                 link.target_lane_units_per_cable
             )
             for _ in range(link.num_cables)
         ]
 
-        graph.add_edge(
+        bundle_attrs: LinkBundleAttrs = {
+            "port_pool": link.port_pool,
+            "source_ports": source_ports,
+            "target_ports": target_ports,
+            "num_cables": link.num_cables,
+            "cable_bandwidth_gb": link.cable_bandwidth_gb,
+            "source_lane_units_per_cable": link.source_lane_units_per_cable,
+            "target_lane_units_per_cable": link.target_lane_units_per_cable,
+            "fabric": link.fabric_name,
+        }
+        _add_link_bundle(
+            graph,
             link.source_graph_node_id,
             link.target_graph_node_id,
-            source_ports=source_ports,
-            target_ports=target_ports,
-            num_cables=link.num_cables,
-            cable_bandwidth_gb=link.cable_bandwidth_gb,
-            source_lane_units_per_cable=link.source_lane_units_per_cable,
-            target_lane_units_per_cable=link.target_lane_units_per_cable,
-            fabric=link.fabric_name,
+            bundle_attrs,
         )
 
 
-def _allocator_key(node: ExpandedNode) -> tuple[str, str | None]:
+def _allocator_key(node: ExpandedNode, port_pool: str) -> tuple[str, str | None, str]:
+    normalized_pool_name = normalize_identifier(port_pool)
     if node.is_shared_gpu_node:
-        return node.graph_node_id, node.fabric_name
-    return node.graph_node_id, None
+        return node.graph_node_id, node.fabric_name, normalized_pool_name
+    return node.graph_node_id, None, normalized_pool_name
+
+
+def _add_link_bundle(
+    graph: nx.Graph,
+    source_node_id: str,
+    target_node_id: str,
+    bundle_attrs: LinkBundleAttrs,
+) -> None:
+    fabric_name = bundle_attrs.get("fabric")
+    if not graph.has_edge(source_node_id, target_node_id):
+        graph.add_edge(
+            source_node_id,
+            target_node_id,
+            fabric=fabric_name,
+            link_bundles=(bundle_attrs,),
+        )
+        return
+
+    edge_data = cast(dict[str, object], graph.edges[source_node_id, target_node_id])
+    existing_fabric = fabric_name_for_edge(edge_data)
+    if existing_fabric != fabric_name:
+        raise ValueError(
+            f"Cannot merge link bundles across fabrics on edge "
+            f"{source_node_id!r} <-> {target_node_id!r}: {existing_fabric!r} vs "
+            f"{fabric_name!r}."
+        )
+    edge_data["link_bundles"] = (*link_bundle_attrs(edge_data), bundle_attrs)

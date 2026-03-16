@@ -18,6 +18,7 @@ from topology_generator.config_types import (
     InvalidTopologyConfig,
     LayerConfig,
     LinkConfig,
+    PortPoolConfig,
     TopologyConfig,
 )
 
@@ -36,6 +37,7 @@ def validate_topology_config(config: TopologyConfig) -> None:
         return
 
     _validate_name_uniqueness(config.layers, "Layer")
+    _validate_layer_port_pool_names(config.layers, "layers")
     _validate_layer_placements(config, config.layers, "layers")
     _validate_expanded_node_id_uniqueness(config, config.layers)
     _validate_links(config, config.layers, config.links, "links")
@@ -78,6 +80,11 @@ def _validate_multi_fabric_semantics(config: TopologyConfig) -> None:
         _validate_name_uniqueness(
             fabric.layers,
             f"Fabric {fabric.name!r} layer",
+        )
+        _validate_layer_port_pool_names(
+            fabric.layers,
+            f"fabrics[{fabric.index}].layers",
+            is_multi_fabric_layers=True,
         )
         for layer in fabric.layers:
             if normalize_identifier(layer.name) == GPU_NODES_LAYER_NAME:
@@ -151,9 +158,9 @@ def _validate_grouping_sizes(config: TopologyConfig) -> None:
 
 def _validate_gpu_nodes_fabric_mappings(config: TopologyConfig) -> None:
     assert config.gpu_nodes is not None
-    port_layout_names = config.gpu_nodes.fabric_names
-    normalized_port_layout_names = {
-        normalize_identifier(name): name for name in port_layout_names
+    pool_names = config.gpu_nodes.fabric_names
+    normalized_pool_names = {
+        normalize_identifier(name): name for name in pool_names
     }
     normalized_fabric_names = {
         normalize_identifier(fabric.name): fabric.name for fabric in config.fabrics
@@ -162,23 +169,45 @@ def _validate_gpu_nodes_fabric_mappings(config: TopologyConfig) -> None:
     missing = sorted(
         name
         for normalized_name, name in normalized_fabric_names.items()
-        if normalized_name not in normalized_port_layout_names
+        if normalized_name not in normalized_pool_names
     )
     extra = sorted(
         name
-        for normalized_name, name in normalized_port_layout_names.items()
+        for normalized_name, name in normalized_pool_names.items()
         if normalized_name not in normalized_fabric_names
     )
     if missing or extra:
         details: list[str] = []
         if missing:
-            details.append(f"missing fabric_port_layouts for {missing!r}")
+            details.append(f"missing fabric_port_pools for {missing!r}")
         if extra:
-            details.append(f"unexpected fabric_port_layouts entries {extra!r}")
+            details.append(f"unexpected fabric_port_pools entries {extra!r}")
         raise InvalidTopologyConfig(
-            "gpu_nodes.fabric_port_layouts must match fabrics by name after "
+            "gpu_nodes.fabric_port_pools must match fabrics by name after "
             f"normalization: {', '.join(details)}."
         )
+
+
+def _validate_layer_port_pool_names(
+    layers: Sequence[LayerConfig],
+    path_prefix: str,
+    is_multi_fabric_layers: bool = False,
+) -> None:
+    for layer in layers:
+        _validate_port_pool_names(
+            layer.port_pools,
+            f"{_layer_path(path_prefix, layer, is_multi_fabric_layers)}.port_pools",
+        )
+
+
+def _validate_port_pool_names(
+    port_pools: Sequence[PortPoolConfig],
+    path_prefix: str,
+) -> None:
+    _validate_identifier_uniqueness(
+        [port_pool.name for port_pool in port_pools],
+        f"{path_prefix} names",
+    )
 
 
 def _validate_layer_placements(
@@ -253,16 +282,21 @@ def _validate_links(
     path_prefix: str,
 ) -> None:
     layer_name_to_index = {layer.name: layer.index for layer in layers}
-    seen_layer_pairs: set[tuple[str, str]] = set()
+    seen_link_keys: set[tuple[str, str, str]] = set()
 
     for link in links:
-        layer_pair = (link.from_layer, link.to_layer)
-        if layer_pair in seen_layer_pairs:
+        link_key = (
+            link.from_layer,
+            link.to_layer,
+            normalize_identifier(link.port_pool),
+        )
+        if link_key in seen_link_keys:
             raise InvalidTopologyConfig(
-                "Each adjacent layer pair may only be linked once: "
-                f"{link.from_layer!r} -> {link.to_layer!r}."
+                "Each adjacent layer pair and port_pool combination may only be linked "
+                f"once: {link.from_layer!r} -> {link.to_layer!r} on "
+                f"{link.port_pool!r}."
             )
-        seen_layer_pairs.add(layer_pair)
+        seen_link_keys.add(link_key)
 
         if link.from_layer not in layer_name_to_index:
             raise InvalidTopologyConfig(
@@ -287,6 +321,7 @@ def _validate_links(
         lower_layer = next(layer for layer in layers if layer.index == lower_index)
         upper_layer = next(layer for layer in layers if layer.index == upper_index)
         _validate_link_policy(config, link, lower_layer, upper_layer, path_prefix)
+        _validate_link_port_pool_support(link, lower_layer, upper_layer, path_prefix)
         _validate_link_bandwidth_support(link, lower_layer, upper_layer, path_prefix)
 
 
@@ -345,6 +380,22 @@ def _validate_link_policy(
     )
 
 
+def _validate_link_port_pool_support(
+    link: LinkConfig,
+    lower_layer: LayerConfig,
+    upper_layer: LayerConfig,
+    path_prefix: str,
+) -> None:
+    for layer in (lower_layer, upper_layer):
+        if layer.has_port_pool(link.port_pool):
+            continue
+        raise InvalidTopologyConfig(
+            f"{path_prefix}[{link.index}].port_pool {link.port_pool!r} is not "
+            f"defined on layer {layer.name!r}; available pools are "
+            f"{list(layer.port_pool_names)!r}."
+        )
+
+
 def _validate_link_bandwidth_support(
     link: LinkConfig,
     lower_layer: LayerConfig,
@@ -352,13 +403,18 @@ def _validate_link_bandwidth_support(
     path_prefix: str,
 ) -> None:
     for layer in (lower_layer, upper_layer):
-        if layer.lane_units_for_bandwidth(link.cable_bandwidth_gb) is None:
-            raise InvalidTopologyConfig(
-                f"{path_prefix}[{link.index}].cable_bandwidth_gb "
-                f"{link.cable_bandwidth_gb:g} GB/s is not supported by layer "
-                f"{layer.name!r}; supported port bandwidths are "
-                f"{list(layer.supported_port_bandwidths_gb)!r}."
-            )
+        if (
+            layer.lane_units_for_pool_bandwidth(link.port_pool, link.cable_bandwidth_gb)
+            is not None
+        ):
+            continue
+        supported_bandwidths = layer.port_pool(link.port_pool).supported_port_bandwidths_gb
+        raise InvalidTopologyConfig(
+            f"{path_prefix}[{link.index}].cable_bandwidth_gb "
+            f"{link.cable_bandwidth_gb:g} GB/s is not supported by layer "
+            f"{layer.name!r} port pool {layer.port_pool(link.port_pool).name!r}; "
+            f"supported port bandwidths are {list(supported_bandwidths)!r}."
+        )
 
 
 def _validate_expanded_node_id_uniqueness(

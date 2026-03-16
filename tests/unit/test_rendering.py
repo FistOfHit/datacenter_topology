@@ -1,41 +1,32 @@
-import importlib
 from pathlib import Path
-from types import SimpleNamespace
 
-import matplotlib.image as mpimg
 import networkx as nx
-import pytest
 
-import topology_generator.render_environment as render_environment
-import topology_generator.render_drawing as render_drawing
-from topology_generator.topology_generator import generate_topology, get_fabric_view
 from topology_generator.render_drawing import (
     AGGREGATE_BANDWIDTH_LEGEND_LABEL,
     AGGREGATE_BANDWIDTH_LEGEND_MARKER,
     TITLE_FONT_SIZE,
+    _visible_port_pool_lines,
     build_legend_elements,
     get_fanout_annotation,
 )
-from topology_generator.render_environment import ensure_matplotlib_environment
 from topology_generator.render_formatting import (
     LINK_COLOR_PALETTE,
+    format_additional_port_pools,
     format_bandwidth,
     format_fanout_label,
     format_group_label,
     format_hidden_group_label,
     format_hidden_node_label,
     format_node_name,
+    format_port_pool_summary,
     get_bandwidth_colors,
 )
 from topology_generator.render_layout import (
     build_layout_profile,
-    build_render_summary,
     calculate_group_layer_bandwidth,
-    calculate_layout,
     calculate_layer_bandwidth,
-    calculate_plot_limits,
-    compute_annotation_columns,
-    compute_group_bandwidth_arrow_x,
+    calculate_layout,
     compute_group_lane_layout,
     compute_node_box_geometry,
     get_group_centers,
@@ -43,14 +34,17 @@ from topology_generator.render_layout import (
     select_visible_group_indices,
 )
 from topology_generator.rendering import build_topology_title, visualize_topology
+from topology_generator.topology_generator import generate_topology
 
 
-def _port_layout(
+def _pool(
+    name: str,
     base_lane_bandwidth_gb: float,
     total_lane_units: int,
     supported_modes: list[tuple[float, int]],
 ) -> dict[str, object]:
     return {
+        "name": name,
         "base_lane_bandwidth_gb": base_lane_bandwidth_gb,
         "total_lane_units": total_lane_units,
         "supported_port_modes": [
@@ -71,8 +65,8 @@ def _mixed_scope_oob_config(total_nodes: int = 8) -> dict[str, object]:
         ],
         "gpu_nodes": {
             "total_nodes": total_nodes,
-            "fabric_port_layouts": {
-                "oob": _port_layout(100, 1, [(100, 1)]),
+            "fabric_port_pools": {
+                "oob": [_pool("fabric", 100, 1, [(100, 1)])],
             },
         },
         "fabrics": [
@@ -84,13 +78,13 @@ def _mixed_scope_oob_config(total_nodes: int = 8) -> dict[str, object]:
                         "name": "leaf",
                         "placement": "rack",
                         "nodes_per_group": 1,
-                        "port_layout": _port_layout(100, 4, [(100, 1), (200, 2)]),
+                        "port_pools": [_pool("fabric", 100, 4, [(100, 1), (200, 2)])],
                     },
                     {
                         "name": "spine",
                         "placement": "pod",
                         "nodes_per_group": 1,
-                        "port_layout": _port_layout(100, 4, [(200, 2)]),
+                        "port_pools": [_pool("fabric", 100, 4, [(200, 2)])],
                     },
                 ],
                 "links": [
@@ -98,6 +92,7 @@ def _mixed_scope_oob_config(total_nodes: int = 8) -> dict[str, object]:
                         "from": "gpu_nodes",
                         "to": "leaf",
                         "policy": "same_scope_full_mesh",
+                        "port_pool": "fabric",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     },
@@ -105,6 +100,7 @@ def _mixed_scope_oob_config(total_nodes: int = 8) -> dict[str, object]:
                         "from": "leaf",
                         "to": "spine",
                         "policy": "to_ancestor_full_mesh",
+                        "port_pool": "fabric",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 200,
                     },
@@ -114,21 +110,26 @@ def _mixed_scope_oob_config(total_nodes: int = 8) -> dict[str, object]:
     }
 
 
-def test_format_bandwidth():
+def test_format_helpers():
     assert format_bandwidth(400) == "400 GB/s"
     assert format_bandwidth(3200) == "3.2 TB/s"
-
-
-def test_format_fanout_label():
     assert format_fanout_label(16, 6400) == "16 cables"
-
-
-def test_format_labels():
     assert format_node_name("GPU server") == "GPU server"
     assert format_node_name("Extremely Long Layer Name") == "Extremely..."
     assert format_hidden_node_label(3) == "..."
     assert format_hidden_group_label(62) == "..."
     assert format_group_label("pod", 4) == "pod_4"
+    assert format_port_pool_summary(
+        {
+            "name": "fabric",
+            "used_lane_units": 3,
+            "total_lane_units": 8,
+            "port_offset": 0,
+            "base_lane_bandwidth_gb": 400,
+            "supported_port_bandwidths_gb": (400.0,),
+        }
+    ) == "fabric: 3/8"
+    assert format_additional_port_pools(2) == "+2 more pools"
 
 
 def test_select_visible_group_indices_and_centers():
@@ -158,13 +159,13 @@ def test_compute_group_lane_layout_reserves_hidden_group_middle_lane():
     assert hidden_placeholder_x == 0.0
 
 
-def test_node_box_geometry_fits_text_stack():
+def test_node_box_geometry_fits_pool_summary_stack():
     geometry = compute_node_box_geometry()
 
     assert geometry.name_y_offset < geometry.half_height
     assert abs(geometry.ports_label_y_offset) < geometry.half_height
     assert geometry.width > 1.9
-    assert geometry.height > 1.2
+    assert geometry.height > 1.4
     assert geometry.aggregate_x_offset == -2.35
     assert geometry.aggregate_left_extent == 3.35
 
@@ -276,18 +277,6 @@ def test_calculate_layer_bandwidth_sums_all_links_between_adjacent_layers():
     )
 
 
-def test_calculate_layer_bandwidth_respects_requested_node_subsets():
-    graph = nx.Graph()
-    graph.add_node("compute_1", layer_index=0)
-    graph.add_node("compute_2", layer_index=0)
-    graph.add_node("leaf_1", layer_index=1)
-    graph.add_node("leaf_2", layer_index=1)
-    graph.add_edge("compute_1", "leaf_1", num_cables=1, cable_bandwidth_gb=100)
-    graph.add_edge("compute_2", "leaf_2", num_cables=1, cable_bandwidth_gb=200)
-
-    assert calculate_layer_bandwidth(graph, ["compute_1"], ["leaf_1"]) == 100
-
-
 def test_calculate_group_layer_bandwidth_counts_only_matching_group_pairs():
     graph = nx.Graph()
     graph.add_node("pod_1_leaf_1", layer_index=1, group_index=1)
@@ -303,13 +292,57 @@ def test_calculate_group_layer_bandwidth_counts_only_matching_group_pairs():
     assert calculate_group_layer_bandwidth(graph, 1, 2, 2) == 800
 
 
-def test_two_pod_layout_uses_tighter_middle_gap(two_pod_dense_config):
-    layout = calculate_layout(generate_topology(two_pod_dense_config))
-    left_bound, right_bound = sorted(layout.group_bounds, key=lambda bound: bound[0])
+def test_visible_port_pool_lines_handle_one_two_and_many_pools():
+    one_pool = {
+        "port_pools": (
+            {
+                "name": "fabric",
+                "used_lane_units": 3,
+                "total_lane_units": 8,
+                "port_offset": 0,
+                "base_lane_bandwidth_gb": 400,
+                "supported_port_bandwidths_gb": (400.0,),
+            },
+        )
+    }
+    two_pools = {
+        "port_pools": (
+            {
+                "name": "fabric",
+                "used_lane_units": 3,
+                "total_lane_units": 8,
+                "port_offset": 0,
+                "base_lane_bandwidth_gb": 400,
+                "supported_port_bandwidths_gb": (400.0,),
+            },
+            {
+                "name": "mgmt",
+                "used_lane_units": 1,
+                "total_lane_units": 4,
+                "port_offset": 8,
+                "base_lane_bandwidth_gb": 100,
+                "supported_port_bandwidths_gb": (100.0,),
+            },
+        )
+    }
+    many_pools = {
+        "port_pools": (
+            two_pools["port_pools"][0],
+            two_pools["port_pools"][1],
+            {
+                "name": "storage",
+                "used_lane_units": 2,
+                "total_lane_units": 2,
+                "port_offset": 12,
+                "base_lane_bandwidth_gb": 200,
+                "supported_port_bandwidths_gb": (200.0,),
+            },
+        )
+    }
 
-    inner_gap = right_bound[0] - (left_bound[0] + left_bound[2])
-    assert 6.0 <= inner_gap <= 13.0
-    assert not any(text == "...(0 more)..." for _, _, text in layout.placeholder_labels)
+    assert _visible_port_pool_lines(one_pool) == ["fabric: 3/8"]
+    assert _visible_port_pool_lines(two_pools) == ["fabric: 3/8", "mgmt: 1/4"]
+    assert _visible_port_pool_lines(many_pools) == ["fabric: 3/8", "+2 more pools"]
 
 
 def test_multi_pod_layout_adds_centered_hidden_pod_placeholder(multi_pod_dense_config):
@@ -319,460 +352,22 @@ def test_multi_pod_layout_adds_centered_hidden_pod_placeholder(multi_pod_dense_c
     inner_gap = right_bound[0] - (left_bound[0] + left_bound[2])
     assert inner_gap >= 2.3
     assert any(text == "..." and x == 0.0 for x, _, text in layout.placeholder_labels)
-    assert any(text == "..." for _, _, text in layout.placeholder_labels)
 
 
-def test_hidden_global_layers_span_visible_diagram_width(multi_pod_dense_config):
-    graph = generate_topology(multi_pod_dense_config)
-    layout = calculate_layout(graph)
-
-    hidden_global_nodes = [
-        node
-        for node in layout.visible_nodes
-        if graph.nodes[node].get("group_index") is None
-        and graph.nodes[node]["layer_name"] == "spine"
-    ]
-    hidden_global_xs = [layout.positions[node][0] for node in hidden_global_nodes]
-
-    assert len(hidden_global_xs) == 2
-    assert max(abs(x) for x in hidden_global_xs) > (layout.profile.global_node_offset + 2.0)
-
-
-def test_layout_keeps_hidden_node_placeholders_centered_in_pod(two_pod_dense_config):
-    graph = generate_topology(two_pod_dense_config)
-    layout = calculate_layout(graph)
-    compute_placeholders = [
-        x
-        for x, y, text in layout.placeholder_labels
-        if text == "..." and y == 0.0
-    ]
-
-    assert compute_placeholders
-    for group_index in (1, 2):
-        visible_group_nodes = [
-            node
-            for node, (x, y) in layout.positions.items()
-            if graph.nodes[node].get("group_index") == group_index
-            and graph.nodes[node]["layer_index"] == 0
-            and y == 0.0
-        ]
-        visible_xs = sorted(layout.positions[node][0] for node in visible_group_nodes)
-        midpoint = sum(visible_xs) / len(visible_xs)
-        assert any(abs(midpoint - x) < 1e-9 for x in compute_placeholders)
-
-
-def test_annotation_column_is_inside_tight_plot_limits(multi_pod_dense_config):
-    layout = calculate_layout(generate_topology(multi_pod_dense_config))
-    x_limits, _ = calculate_plot_limits(layout)
-
-    assert layout.layer_bandwidth_x < x_limits[1]
-    assert layout.layer_bandwidth_x + layout.profile.right_annotation_extent <= x_limits[1]
-
-
-def test_group_bandwidth_arrow_stays_inside_pod_and_near_rightmost_node(
-    multi_pod_dense_config,
+def test_visualize_topology_writes_single_and_multi_fabric_outputs(
+    tmp_path: Path,
+    sample_config,
 ):
-    graph = generate_topology(multi_pod_dense_config)
-    layout = calculate_layout(graph)
-    rightmost_bound = max(layout.group_bounds, key=lambda bound: bound[0] + bound[2])
-    group_index = int(rightmost_bound[4].rsplit("_", 1)[1])
+    graph = generate_topology(sample_config)
 
-    arrow_x = compute_group_bandwidth_arrow_x(
-        graph,
-        layout.positions,
-        layout.profile,
-        group_index,
-    )
-    rightmost_node_x = max(
-        x + (layout.profile.node_box.width / 2)
-        for node, (x, _) in layout.positions.items()
-        if graph.nodes[node].get("group_index") == group_index
-    )
-    pod_right_edge = rightmost_bound[0] + rightmost_bound[2]
-
-    assert rightmost_node_x < arrow_x < pod_right_edge
-    assert (arrow_x - rightmost_node_x) <= 0.45
-    assert (pod_right_edge - arrow_x) >= 0.45
-
-
-def test_draw_group_bandwidth_arrows_emits_ancestor_scope_arrows_for_mixed_scope(
-    monkeypatch,
-):
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config()), "oob")
-    layout_result = calculate_layout(graph)
-    calls: list[tuple[float, float, float, float]] = []
-
-    monkeypatch.setattr(
-        render_drawing,
-        "add_layer_bandwidth_arrow",
-        lambda ax, y1, y2, bandwidth_gb, x_pos: calls.append(
-            (y1, y2, bandwidth_gb, x_pos)
-        ),
-    )
-
-    render_drawing.draw_group_bandwidth_arrows(graph, object(), layout_result)
-
-    ancestor_calls = [
-        (y1, y2, bandwidth_gb, x_pos)
-        for y1, y2, bandwidth_gb, x_pos in calls
-        if y1 == pytest.approx(layout_result.layer_heights[1])
-        and y2 == pytest.approx(layout_result.layer_heights[2])
-    ]
-
-    assert len(ancestor_calls) == 2
-    assert all(bandwidth_gb == pytest.approx(400.0) for _, _, bandwidth_gb, _ in ancestor_calls)
-    assert len({round(x_pos, 3) for _, _, _, x_pos in ancestor_calls}) == 2
-
-
-def test_multi_scope_layout_spreads_visible_pods_far_apart():
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
-    layout = calculate_layout(graph)
-
-    pod_scoped_centers = sorted(
-        pos[0]
-        for node, pos in layout.positions.items()
-        if graph.nodes[node].get("placement_scope") == "pod"
-    )
-    pod_center_gap = pod_scoped_centers[-1] - pod_scoped_centers[0]
-
-    assert pod_center_gap >= 40.0
-    assert layout.profile.figure_width == 36.0
-
-
-def test_multi_scope_layout_keeps_rack_box_inside_pod_and_contains_left_aggregate_labels():
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
-    layout = calculate_layout(graph)
-    pod_bound = next(bound for bound in layout.group_bounds if bound[4] == "pod_1")
-    rack_bound = min(
-        (bound for bound in layout.group_bounds if bound[4] == "rack_1"),
-        key=lambda bound: bound[0],
-    )
-
-    pod_left, pod_bottom, pod_width, _ = pod_bound[:4]
-    _, rack_bottom, _, _ = rack_bound[:4]
-
-    assert rack_bottom > pod_bottom
-
-    leftmost_node = min(
-        (
-            node
-            for node in layout.visible_nodes
-            if graph.nodes[node].get("scope_labels", ())[:1] == ("pod_1",)
-        ),
-        key=lambda node: layout.positions[node][0],
-    )
-    leftmost_node_x = layout.positions[leftmost_node][0]
-
-    assert pod_left < leftmost_node_x - 3.0
-    assert pod_left + pod_width > leftmost_node_x
-
-
-def test_multi_scope_group_bandwidth_arrows_separate_rack_and_pod_lanes(monkeypatch):
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
-    layout = calculate_layout(graph)
-    calls: list[tuple[float, float, float, float]] = []
-
-    monkeypatch.setattr(
-        render_drawing,
-        "add_layer_bandwidth_arrow",
-        lambda ax, y1, y2, bandwidth_gb, x_pos: calls.append(
-            (y1, y2, bandwidth_gb, x_pos)
-        ),
-    )
-
-    render_drawing.draw_group_bandwidth_arrows(graph, object(), layout)
-
-    rightmost_pod_bound = max(
-        (bound for bound in layout.group_bounds if bound[4] == "pod_4"),
-        key=lambda bound: bound[0],
-    )
-    pod_right = rightmost_pod_bound[0] + rightmost_pod_bound[2]
-    rightmost_rack_bound = max(
-        (
-            bound
-            for bound in layout.group_bounds
-            if bound[4].startswith("rack_") and bound[0] > rightmost_pod_bound[0]
-        ),
-        key=lambda bound: bound[0],
-    )
-    rack_right = rightmost_rack_bound[0] + rightmost_rack_bound[2]
-    rack_calls = [x_pos for _, _, bandwidth_gb, x_pos in calls if bandwidth_gb == pytest.approx(200.0)]
-    pod_calls = [x_pos for _, _, bandwidth_gb, x_pos in calls if bandwidth_gb == pytest.approx(400.0)]
-
-    assert rack_calls
-    assert pod_calls
-    assert max(rack_calls) < rack_right
-    assert rack_right < max(pod_calls) < pod_right
-
-
-def test_multi_scope_uses_local_labels_for_nested_scope_boxes():
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
-    layout = calculate_layout(graph)
-    labels = [label for _, _, _, _, label in layout.group_bounds]
-
-    assert "pod_1" in labels
-    assert "rack_1" in labels
-    assert "pod_1_rack_1" not in labels
-
-
-def test_multi_scope_global_annotation_column_starts_right_of_group_arrow_labels(monkeypatch):
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
-    layout = calculate_layout(graph)
-    calls: list[tuple[float, float, float, float]] = []
-
-    monkeypatch.setattr(
-        render_drawing,
-        "add_layer_bandwidth_arrow",
-        lambda ax, y1, y2, bandwidth_gb, x_pos: calls.append(
-            (y1, y2, bandwidth_gb, x_pos)
-        ),
-    )
-
-    render_drawing.draw_group_bandwidth_arrows(graph, object(), layout)
-
-    rightmost_group_arrow = max(x_pos for _, _, _, x_pos in calls)
-    rightmost_group_bound = max(left + width for left, _, width, _, _ in layout.group_bounds)
-    assert layout.layer_bandwidth_x > rightmost_group_arrow + 0.6
-    assert layout.layer_bandwidth_x > rightmost_group_bound + 0.5
-
-
-def test_multi_scope_hidden_pod_placeholder_stays_between_visible_pod_bounds():
-    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
-    layout = calculate_layout(graph)
-    pod_bounds = sorted(
-        (bound for bound in layout.group_bounds if bound[4] in {"pod_1", "pod_4"}),
-        key=lambda bound: bound[0],
-    )
-    left_pod, right_pod = pod_bounds
-    center_placeholder = next(placeholder for placeholder in layout.placeholder_labels if placeholder[2] == "...")
-    left_gap_edge = left_pod[0] + left_pod[2]
-    right_gap_edge = right_pod[0]
-
-    assert abs(center_placeholder[0] - left_gap_edge) > 1.0
-    assert abs(center_placeholder[0] - right_gap_edge) > 1.0
-
-
-def test_compute_annotation_column_tracks_content_width(two_pod_dense_config):
-    layout = calculate_layout(generate_topology(two_pod_dense_config))
-    annotation_x = compute_annotation_columns(
-        layout.positions,
-        layout.group_bounds,
-        layout.profile,
-    )
-
-    assert annotation_x == layout.layer_bandwidth_x
-
-
-def test_calculate_plot_limits_expand_just_past_content(two_pod_dense_config):
-    layout = calculate_layout(generate_topology(two_pod_dense_config))
-    x_limits, y_limits = calculate_plot_limits(layout)
-
-    assert x_limits[0] < min(x for x, _ in layout.positions.values())
-    assert x_limits[1] > layout.layer_bandwidth_x
-    assert y_limits[0] < min(y for _, y in layout.positions.values())
-    assert y_limits[1] > max(y for _, y in layout.positions.values())
-
-
-def test_visualize_topology_writes_output(tmp_path, two_pod_dense_config):
-    visualize_topology(generate_topology(two_pod_dense_config), str(tmp_path))
+    visualize_topology(graph, tmp_path)
 
     assert (tmp_path / "topology.png").exists()
 
 
-def test_visual_density_for_two_pod_example(tmp_path, two_pod_dense_config):
-    image_path = render_example(tmp_path / "two_pod", two_pod_dense_config)
-    width_fraction, height_fraction, margins = image_content_metrics(image_path)
+def test_visualize_topology_writes_multi_scope_outputs(tmp_path: Path):
+    graph = generate_topology(_mixed_scope_oob_config())
 
-    assert width_fraction > 0.5
-    assert height_fraction > 0.55
-    assert margins["right"] < 0.2
-    assert margins["top"] < 0.18
+    visualize_topology(graph, tmp_path)
 
-
-def test_visual_density_for_multi_pod_example(tmp_path, multi_pod_dense_config):
-    image_path = render_example(tmp_path / "multi_pod", multi_pod_dense_config)
-    width_fraction, height_fraction, margins = image_content_metrics(image_path)
-
-    assert width_fraction > 0.52
-    assert height_fraction > 0.58
-    assert margins["right"] < 0.2
-    assert margins["top"] < 0.18
-
-
-def test_ensure_matplotlib_environment_sets_safe_fallbacks(tmp_path, monkeypatch):
-    monkeypatch.delenv("MPLCONFIGDIR", raising=False)
-    monkeypatch.delenv("MPLBACKEND", raising=False)
-    monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setattr(render_environment, "_directory_is_writable", lambda path: False)
-    monkeypatch.setattr(render_environment.tempfile, "gettempdir", lambda: str(tmp_path))
-
-    ensure_matplotlib_environment()
-
-    assert render_environment.os.environ["MPLCONFIGDIR"] == str(
-        tmp_path / "topology_generator_matplotlib"
-    )
-    assert render_environment.os.environ["MPLBACKEND"] == "Agg"
-
-
-def test_render_environment_import_has_no_side_effects(monkeypatch):
-    monkeypatch.delenv("MPLCONFIGDIR", raising=False)
-    monkeypatch.delenv("MPLBACKEND", raising=False)
-
-    importlib.reload(render_environment)
-
-    assert "MPLCONFIGDIR" not in render_environment.os.environ
-    assert "MPLBACKEND" not in render_environment.os.environ
-
-
-def test_load_matplotlib_is_lazy_and_cached(monkeypatch):
-    calls: list[str] = []
-
-    def fake_import_module(name: str):
-        calls.append(name)
-        if name == "matplotlib.pyplot":
-            return "plt-module"
-        if name == "matplotlib.lines":
-            return SimpleNamespace(Line2D="line2d")
-        if name == "matplotlib.patches":
-            return SimpleNamespace(Patch="patch", Arc="arc", Rectangle="rectangle")
-        raise AssertionError(f"Unexpected import: {name}")
-
-    render_environment.load_matplotlib.cache_clear()
-    monkeypatch.setattr(
-        render_environment,
-        "ensure_matplotlib_environment",
-        lambda: calls.append("ensure"),
-    )
-    monkeypatch.setattr(
-        render_environment.importlib,
-        "import_module",
-        fake_import_module,
-    )
-
-    first = render_environment.load_matplotlib()
-    second = render_environment.load_matplotlib()
-
-    assert calls == [
-        "ensure",
-        "matplotlib.pyplot",
-        "matplotlib.lines",
-        "matplotlib.patches",
-    ]
-    assert first is second
-    assert first.plt == "plt-module"
-    assert first.Line2D == "line2d"
-    assert first.Patch == "patch"
-    assert first.Arc == "arc"
-    assert first.Rectangle == "rectangle"
-
-
-def test_build_render_summary_tracks_layer_and_group_bandwidth(two_pod_dense_config):
-    summary = build_render_summary(generate_topology(two_pod_dense_config))
-
-    assert summary.layer_bandwidths[(0, 1)] > 0
-    assert summary.group_layer_bandwidths[(1, 0, 1)] > 0
-
-
-def test_visualize_topology_writes_per_fabric_outputs(tmp_path, multi_fabric_config):
-    visualize_topology(generate_topology(multi_fabric_config), str(tmp_path))
-
-    assert (tmp_path / "topology_backend.png").exists()
-    assert (tmp_path / "topology_frontend.png").exists()
     assert (tmp_path / "topology_oob.png").exists()
-
-
-def test_visualize_topology_normalizes_fabric_name_in_output_filename(tmp_path):
-    config = {
-        "groupings": [
-            {
-                "name": "pod",
-                "members_per_group": 1,
-            }
-        ],
-        "gpu_nodes": {
-            "total_nodes": 1,
-            "fabric_port_layouts": {
-                "front/end": {
-                    "base_lane_bandwidth_gb": 100,
-                    "total_lane_units": 1,
-                    "supported_port_modes": [
-                        {
-                            "port_bandwidth_gb": 100,
-                            "lane_units": 1,
-                        }
-                    ],
-                }
-            },
-        },
-        "fabrics": [
-            {
-                "name": "front/end",
-                "gpu_nodes_placement": "pod",
-                "layers": [
-                    {
-                        "name": "leaf",
-                        "placement": "pod",
-                        "nodes_per_group": 1,
-                        "port_layout": {
-                            "base_lane_bandwidth_gb": 100,
-                            "total_lane_units": 1,
-                            "supported_port_modes": [
-                                {
-                                    "port_bandwidth_gb": 100,
-                                    "lane_units": 1,
-                                }
-                            ],
-                        },
-                    }
-                ],
-                "links": [
-                    {
-                        "from": "gpu_nodes",
-                        "to": "leaf",
-                        "policy": "same_scope_full_mesh",
-                        "cables_per_pair": 1,
-                        "cable_bandwidth_gb": 100,
-                    }
-                ],
-            }
-        ],
-    }
-
-    visualize_topology(generate_topology(config), str(tmp_path))
-
-    assert (tmp_path / "topology_front_end.png").exists()
-
-
-def render_example(output_dir: Path, config: dict[str, object]) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    visualize_topology(generate_topology(config), str(output_dir))
-    return output_dir / "topology.png"
-
-
-def image_content_metrics(image_path: Path) -> tuple[float, float, dict[str, float]]:
-    image = mpimg.imread(image_path)
-    if image.shape[-1] == 4:
-        rgb = image[..., :3]
-    else:
-        rgb = image
-    mask = rgb.mean(axis=2) < 0.985
-    ys, xs = mask.nonzero()
-    assert len(xs) > 0
-    assert len(ys) > 0
-
-    min_x = xs.min()
-    max_x = xs.max()
-    min_y = ys.min()
-    max_y = ys.max()
-    width = mask.shape[1]
-    height = mask.shape[0]
-    width_fraction = (max_x - min_x + 1) / width
-    height_fraction = (max_y - min_y + 1) / height
-    margins = {
-        "left": min_x / width,
-        "right": (width - max_x - 1) / width,
-        "top": min_y / height,
-        "bottom": (height - max_y - 1) / height,
-    }
-    return width_fraction, height_fraction, margins

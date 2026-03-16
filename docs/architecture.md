@@ -14,9 +14,9 @@ The application runs as one CLI pipeline:
 5. Expand grouped intent into concrete nodes and concrete link bundles.
 6. Validate the expanded topology against lane-unit capacity and supported port
    modes.
-7. Build a `networkx.Graph` with node and edge metadata.
+7. Build a `networkx.Graph` with node metadata and coalesced per-pair link bundles.
 8. Render `topology.png` or per-fabric `topology_<fabric>.png`.
-9. Flatten graph edges into `port_mapping.xlsx`.
+9. Flatten graph edge bundles into `port_mapping.xlsx`.
 
 Important execution details:
 
@@ -43,9 +43,10 @@ Key guarantees:
 
 - single-fabric and multi-fabric config shapes are mutually exclusive
 - layer, group, grouping, and fabric names stay unique after normalization
+- port-pool names stay unique within each node-capable config object
 - links are limited to adjacent layers in declared order
 - link policies must match endpoint placement semantics
-- lane-based port math must be valid on every layer
+- lane-based port math must be valid in every named port pool
 - `gpu_nodes` is the only shared layer in multi-fabric mode
 - multi-fabric layers carry explicit literal scope placements such as `rack`,
   `pod`, or `global`
@@ -57,7 +58,7 @@ Expansion converts validated grouped config into concrete topology intent:
 - concrete nodes
 - concrete full-mesh link bundles
 - ancestry-aware scope metadata for grouped layers
-- per-end lane consumption for each cable bandwidth
+- per-end lane consumption for each cable bandwidth in the named port pool
 
 Expansion is intentionally graph-free. It produces a deterministic intermediate
 representation that later stages can validate and materialize.
@@ -68,10 +69,10 @@ Validation runs on the expanded topology, not the raw YAML shape.
 
 It checks:
 
-- per-node lane-unit demand
+- per-node, per-pool lane-unit demand
 - per-node aggregate up/down bandwidth
-- supported cable bandwidth on each endpoint
-- aggregate lane demand against hardware capacity
+- supported cable bandwidth on each endpoint in the named pool
+- per-pool lane demand against hardware capacity
 
 In multi-fabric mode, validation remains fabric-local even for shared
 `gpu_nodes`.
@@ -85,8 +86,8 @@ It is responsible for:
 - expansion and expanded-topology validation orchestration
 - graph node creation
 - graph edge creation
-- deterministic contiguous lane allocation per cable
-- storing usage metadata, scope-path metadata, and allocation metadata
+- deterministic contiguous lane allocation per cable within each `(node, pool)`
+- storing usage metadata, per-pool metadata, scope-path metadata, and allocation metadata
 - merging multi-fabric runs into one graph while preserving per-fabric views
 
 ### Render pipeline
@@ -122,14 +123,14 @@ internal contract around graph attributes.
 
 ### `port_mapper.py`
 
-This module converts graph edges into the Excel cut-sheet.
+This module converts graph edge bundles into the Excel cut-sheet.
 
 Stable export behavior:
 
 - one row per physical cable
 - lower-layer to upper-layer orientation
 - explicit source and target group columns
-- per-end base-lane start indices and lane widths
+- per-end globally unique base-lane start indices and lane widths
 - merged multi-fabric workbook with a `fabric` column
 
 ## Design Choices
@@ -168,11 +169,12 @@ to `global`, but may not narrow. Link policies mirror that model through
 `same_scope_full_mesh`, `to_ancestor_full_mesh`, `to_global_full_mesh`, and
 `global_full_mesh`.
 
-### Lane units are the hardware budget
+### Port pools isolate hardware budgets
 
-Port hardware is modeled in base lane units instead of fixed “ports per node”.
-That allows mixed-speed port modes on the same device while still enforcing one
-underlying hardware budget.
+Port hardware is modeled in named base-lane pools instead of a single fixed
+“ports per node” budget. That allows mixed-speed port modes within one pool
+while keeping unrelated hardware banks on the same device isolated for
+validation and allocation.
 
 ### The renderer is a planning view, not a physical layout
 

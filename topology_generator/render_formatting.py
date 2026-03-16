@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import networkx as nx
 
-from topology_generator.graph_metadata import cable_bandwidth_gb
+from topology_generator.graph_metadata import (
+    PortPoolAttrs,
+    cable_bandwidth_gb,
+    link_bundle_attrs,
+)
 
 
 MAX_NODE_NAME_CHARS = 12
 NODE_NAME_FONT_SIZE = 8
 NODE_METADATA_FONT_SIZE = 6.5
 PORT_USAGE_VALUE_FONT_SIZE = 6.5
-PORT_USAGE_LABEL_FONT_SIZE = 5
+PORT_USAGE_LABEL_FONT_SIZE = PORT_USAGE_VALUE_FONT_SIZE
 FANOUT_LABEL_FONT_SIZE = 8
 LAYER_COLOR_PALETTE = [
     "#add8e6",
@@ -67,6 +71,17 @@ def format_fanout_label(num_cables: int, total_bandwidth_gb: float) -> str:
     return f"{num_cables} cables"
 
 
+def format_port_pool_summary(port_pool: PortPoolAttrs) -> str:
+    return (
+        f"{format_node_name(port_pool['name'], max_chars=8)}: "
+        f"{port_pool['used_lane_units']}/{port_pool['total_lane_units']}"
+    )
+
+
+def format_additional_port_pools(hidden_pool_count: int) -> str:
+    return f"+{hidden_pool_count} more pools"
+
+
 def get_layer_height(layer_index: int, layer_spacing: float = 1.0) -> float:
     return float(layer_index) * layer_spacing
 
@@ -78,9 +93,9 @@ def get_layer_color(layer_index: int) -> str:
 def get_bandwidth_colors(graph: nx.Graph) -> dict[float, str]:
     unique_bandwidths = sorted(
         {
-            cable_bandwidth_gb(data)
+            cable_bandwidth_gb(bundle)
             for _, _, data in graph.edges(data=True)
-            if data.get("cable_bandwidth_gb") is not None
+            for bundle in link_bundle_attrs(data)
         }
     )
 

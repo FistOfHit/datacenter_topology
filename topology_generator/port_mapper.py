@@ -1,5 +1,6 @@
 from os import PathLike
 from pathlib import Path
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -8,12 +9,14 @@ import pandas as pd
 
 from topology_generator.graph_metadata import (
     EdgeAttrs,
+    LinkBundleAttrs,
     NodeAttrs,
     OrientedEdgeAllocation,
     cable_bandwidth_gb,
     fabric_name_for_edge,
     flatten_node_attrs_for_fabric,
     is_multi_fabric_graph,
+    link_bundle_attrs,
     natural_sort_key,
     node_group_label,
     node_sort_key,
@@ -107,18 +110,25 @@ def _extract_rows_for_context(
     cable_counter: int,
 ) -> tuple[list[dict[str, object]], int]:
     rows: list[dict[str, object]] = []
+    edge_bundles: list[tuple[str, str, LinkBundleAttrs, int]] = []
+    for source_node_id, target_node_id, attrs in edges:
+        for bundle_index, bundle in enumerate(link_bundle_attrs(cast(EdgeAttrs, attrs))):
+            edge_bundles.append((source_node_id, target_node_id, bundle, bundle_index))
 
-    sorted_edges = sorted(
-        edges,
-        key=lambda edge: _edge_sort_key(context, edge[0], edge[1]),
+    sorted_edge_bundles = sorted(
+        edge_bundles,
+        key=lambda edge_bundle: (
+            _edge_sort_key(context, edge_bundle[0], edge_bundle[1]),
+            edge_bundle[3],
+        ),
     )
 
-    for source_node_id, target_node_id, attrs in sorted_edges:
+    for source_node_id, target_node_id, bundle_attrs, _ in sorted_edge_bundles:
         oriented = _orient_edge_allocation(
             context,
             source_node_id,
             target_node_id,
-            attrs,
+            bundle_attrs,
         )
         source_node_id = oriented["source_node_id"]
         target_node_id = oriented["target_node_id"]
@@ -132,7 +142,7 @@ def _extract_rows_for_context(
             target_node_id,
             source_ports,
             target_ports,
-            _require_int(attrs, "num_cables"),
+            _require_int(bundle_attrs, "num_cables"),
         )
 
         for source_port, target_port in zip(source_ports, target_ports):
@@ -153,7 +163,7 @@ def _extract_rows_for_context(
                     "target_node_id": target_node_id,
                     "target_group": _node_group_label(context, target_node_id),
                     "target_serial_number": None,
-                    "cable_bandwidth_gb": cable_bandwidth_gb(cast(EdgeAttrs, attrs)),
+                    "cable_bandwidth_gb": cable_bandwidth_gb(bundle_attrs),
                     "cable_number": cable_counter,
                 }
             )
@@ -216,7 +226,7 @@ def _orient_edge_allocation(
     context: PortMappingContext,
     source: str,
     target: str,
-    attrs: dict[str, object],
+    attrs: Mapping[str, object],
 ) -> OrientedEdgeAllocation:
     source_ports = _require_int_list(attrs, "source_ports")
     target_ports = _require_int_list(attrs, "target_ports")
@@ -270,14 +280,14 @@ def _node_group_label(context: PortMappingContext, node_id: str) -> str:
     return node_group_label(_node_attrs(context, node_id))
 
 
-def _require_int_list(attrs: dict[str, object], key: str) -> list[int]:
+def _require_int_list(attrs: Mapping[str, object], key: str) -> list[int]:
     value = attrs.get(key)
     if not isinstance(value, list) or not all(isinstance(item, int) for item in value):
         raise ValueError(f"Edge attribute {key!r} must be a list of integers.")
     return cast(list[int], value)
 
 
-def _require_int(attrs: dict[str, object], key: str) -> int:
+def _require_int(attrs: Mapping[str, object], key: str) -> int:
     value = attrs.get(key)
     if not isinstance(value, int):
         raise ValueError(f"Edge attribute {key!r} must be an integer.")

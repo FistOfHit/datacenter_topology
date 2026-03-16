@@ -84,6 +84,43 @@ def test_extract_port_mapping_rows_rejects_num_cables_mismatch():
         extract_port_mapping_rows(graph)
 
 
+def test_extract_port_mapping_rows_flattens_multiple_bundles_on_one_edge():
+    graph = nx.Graph()
+    graph.add_node("leaf_1", layer_index=0, group_label="global")
+    graph.add_node("spine_1", layer_index=1, group_label="global")
+    graph.add_edge(
+        "leaf_1",
+        "spine_1",
+        link_bundles=(
+            {
+                "port_pool": "fabric",
+                "source_ports": [1],
+                "target_ports": [1],
+                "source_lane_units_per_cable": 1,
+                "target_lane_units_per_cable": 1,
+                "num_cables": 1,
+                "cable_bandwidth_gb": 400,
+            },
+            {
+                "port_pool": "mgmt",
+                "source_ports": [3],
+                "target_ports": [3],
+                "source_lane_units_per_cable": 1,
+                "target_lane_units_per_cable": 1,
+                "num_cables": 1,
+                "cable_bandwidth_gb": 100,
+            },
+        ),
+    )
+
+    rows = extract_port_mapping_rows(graph)
+
+    assert [row["source_node_port"] for row in rows] == [1, 3]
+    assert [row["target_node_port"] for row in rows] == [1, 3]
+    assert [row["cable_bandwidth_gb"] for row in rows] == [400, 100]
+    assert [row["cable_number"] for row in rows] == [1, 2]
+
+
 def test_create_port_mapping_returns_expected_dataframe(sample_config):
     from topology_generator.topology_generator import generate_topology
 
@@ -247,3 +284,66 @@ def test_extract_port_mapping_rows_uses_natural_node_ordering():
         "pod_2_gpu_nodes_1",
         "pod_10_gpu_nodes_1",
     ]
+
+
+def test_create_port_mapping_preserves_global_pool_offsets():
+    from topology_generator.topology_generator import generate_topology
+
+    config = {
+        "groups": [],
+        "layers": [
+            {
+                "name": "leaf",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    {
+                        "name": "fabric",
+                        "base_lane_bandwidth_gb": 400,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 400, "lane_units": 1}],
+                    },
+                    {
+                        "name": "mgmt",
+                        "base_lane_bandwidth_gb": 100,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 100, "lane_units": 1}],
+                    },
+                ],
+            },
+            {
+                "name": "spine",
+                "placement": "global",
+                "nodes_per_group": 1,
+                "port_pools": [
+                    {
+                        "name": "fabric",
+                        "base_lane_bandwidth_gb": 400,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 400, "lane_units": 1}],
+                    },
+                    {
+                        "name": "mgmt",
+                        "base_lane_bandwidth_gb": 100,
+                        "total_lane_units": 2,
+                        "supported_port_modes": [{"port_bandwidth_gb": 100, "lane_units": 1}],
+                    },
+                ],
+            },
+        ],
+        "links": [
+            {
+                "from": "leaf",
+                "to": "spine",
+                "policy": "global_full_mesh",
+                "port_pool": "mgmt",
+                "cables_per_pair": 2,
+                "cable_bandwidth_gb": 100,
+            }
+        ],
+    }
+
+    df = create_port_mapping(generate_topology(config))
+
+    assert list(df["source_node_port"]) == [3, 4]
+    assert list(df["target_node_port"]) == [3, 4]

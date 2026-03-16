@@ -6,25 +6,28 @@ groupings:
 
 gpu_nodes:
   total_nodes: 2
-  fabric_port_layouts:
+  fabric_port_pools:
     backend:
-      base_lane_bandwidth_gb: 100
-      total_lane_units: 1
-      supported_port_modes:
-        - port_bandwidth_gb: 100
-          lane_units: 1
+      - name: IB
+        base_lane_bandwidth_gb: 100
+        total_lane_units: 1
+        supported_port_modes:
+          - port_bandwidth_gb: 100
+            lane_units: 1
     frontend:
-      base_lane_bandwidth_gb: 50
-      total_lane_units: 1
-      supported_port_modes:
-        - port_bandwidth_gb: 50
-          lane_units: 1
+      - name: Eth
+        base_lane_bandwidth_gb: 50
+        total_lane_units: 1
+        supported_port_modes:
+          - port_bandwidth_gb: 50
+            lane_units: 1
     oob:
-      base_lane_bandwidth_gb: 25
-      total_lane_units: 1
-      supported_port_modes:
-        - port_bandwidth_gb: 25
-          lane_units: 1
+      - name: fabric
+        base_lane_bandwidth_gb: 25
+        total_lane_units: 1
+        supported_port_modes:
+          - port_bandwidth_gb: 25
+            lane_units: 1
 
 fabrics:
   - name: backend
@@ -33,30 +36,34 @@ fabrics:
       - name: leaf
         placement: pod
         nodes_per_group: 1
-        port_layout:
-          base_lane_bandwidth_gb: 100
-          total_lane_units: 3
-          supported_port_modes:
-            - port_bandwidth_gb: 100
-              lane_units: 1
+        port_pools:
+          - name: IB
+            base_lane_bandwidth_gb: 100
+            total_lane_units: 3
+            supported_port_modes:
+              - port_bandwidth_gb: 100
+                lane_units: 1
       - name: spine
         placement: global
         nodes_per_group: 1
-        port_layout:
-          base_lane_bandwidth_gb: 100
-          total_lane_units: 1
-          supported_port_modes:
-            - port_bandwidth_gb: 100
-              lane_units: 1
+        port_pools:
+          - name: IB
+            base_lane_bandwidth_gb: 100
+            total_lane_units: 1
+            supported_port_modes:
+              - port_bandwidth_gb: 100
+                lane_units: 1
     links:
       - from: gpu_nodes
         to: leaf
         policy: same_scope_full_mesh
+        port_pool: IB
         cables_per_pair: 1
         cable_bandwidth_gb: 100
       - from: leaf
         to: spine
         policy: to_global_full_mesh
+        port_pool: IB
         cables_per_pair: 1
         cable_bandwidth_gb: 100
 
@@ -66,16 +73,18 @@ fabrics:
       - name: tor
         placement: pod
         nodes_per_group: 1
-        port_layout:
-          base_lane_bandwidth_gb: 50
-          total_lane_units: 2
-          supported_port_modes:
-            - port_bandwidth_gb: 50
-              lane_units: 1
+        port_pools:
+          - name: Eth
+            base_lane_bandwidth_gb: 50
+            total_lane_units: 2
+            supported_port_modes:
+              - port_bandwidth_gb: 50
+                lane_units: 1
     links:
       - from: gpu_nodes
         to: tor
         policy: same_scope_full_mesh
+        port_pool: Eth
         cables_per_pair: 1
         cable_bandwidth_gb: 50
 
@@ -85,15 +94,17 @@ fabrics:
       - name: mgmt
         placement: global
         nodes_per_group: 1
-        port_layout:
-          base_lane_bandwidth_gb: 25
-          total_lane_units: 2
-          supported_port_modes:
-            - port_bandwidth_gb: 25
-              lane_units: 1
+        port_pools:
+          - name: fabric
+            base_lane_bandwidth_gb: 25
+            total_lane_units: 2
+            supported_port_modes:
+              - port_bandwidth_gb: 25
+                lane_units: 1
     links:
       - from: gpu_nodes
         to: mgmt
         policy: to_global_full_mesh
+        port_pool: fabric
         cables_per_pair: 1
         cable_bandwidth_gb: 25
