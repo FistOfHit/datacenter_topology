@@ -22,8 +22,8 @@ Topology shape:
 
 - `pod_1` and `pod_2` each contain 8 compute nodes and 4 leaf switches
 - 4 global spine switches are shared above both pods
-- compute -> leaf uses `within_group_full_mesh`
-- leaf -> spine uses `group_to_global_full_mesh`
+- compute -> leaf uses `same_scope_full_mesh`
+- leaf -> spine uses `to_global_full_mesh`
 
 Port model:
 
@@ -50,10 +50,10 @@ Expected result:
 Topology shape:
 
 - `pod_1` through `pod_16` each contain 64 compute nodes, 8 leaf switches, and 8 spine switches
-- compute -> leaf uses `within_group_full_mesh`
-- leaf -> spine uses `within_group_full_mesh` with 8 cables per leaf/spine pair
+- compute -> leaf uses `same_scope_full_mesh`
+- leaf -> spine uses `same_scope_full_mesh` with 8 cables per leaf/spine pair
 - 64 global core switches sit above the pod-local spine layer
-- spine -> core uses `group_to_global_full_mesh`
+- spine -> core uses `to_global_full_mesh`
 
 Port model:
 
@@ -81,9 +81,9 @@ Topology shape:
 
 - `gpu_nodes` is the shared layer-0 population
 - `groupings` declares both `pod = 2` and `rack = 1` for the same shared endpoints
-- the backend fabric adds `leaf -> spine`
-- the frontend fabric adds `tor`
-- the OOB fabric selects the smaller `rack` grouping and adds `mgmt`
+- the backend fabric uses `gpu_nodes_placement: pod` and adds `leaf -> spine`
+- the frontend fabric uses `gpu_nodes_placement: pod` and adds `tor`
+- the OOB fabric uses `gpu_nodes_placement: rack` and adds `mgmt`
 - each fabric is isolated for validation, diagrams, and Excel row generation
 
 Port model:
@@ -117,6 +117,7 @@ Topology shape:
   `gpu_nodes -> leaf -> spine -> core`
 - the `frontend` fabric adds 2 pod-local leaf switches and 8 global spines:
   `gpu_nodes -> leaf -> spine`
+- both fabrics use explicit literal placements and `gpu_nodes_placement: pod`
 - both fabrics reuse the same GPU nodes but remain isolated for validation, diagrams, and cut-sheet generation
 
 Port model:
@@ -127,7 +128,7 @@ Port model:
 - each frontend leaf receives 64 GPU downlinks and 32 spine uplinks, for 96 total lane units
 - each frontend global spine receives 128 total lane units across all pods
 
-## Example 5: Sixteen-Pod Backend And Frontend Plus Rack-Scoped OOB
+## Example 5: Sixteen-Pod Backend And Frontend Plus Mixed-Scope OOB
 
 Config: [`configs/examples/multi_fabric_backend_frontend_oob.yaml`](../configs/examples/multi_fabric_backend_frontend_oob.yaml)
 
@@ -143,20 +144,22 @@ Expected result:
 - `topology_backend.png`
 - `topology_frontend.png`
 - `topology_oob.png`
-- 31,232 rows in `port_mapping.xlsx`
+- 32,384 rows in `port_mapping.xlsx`
 
 Topology shape:
 
 - the shared endpoint population remains `1024` GPUs with `pod = 64`
-- the added `rack = 8` grouping creates `128` rack-local OOB leaves
+- the added `rack = 8` grouping creates `128` rack-local OOB leaves inside `16` pods
 - the `backend` fabric stays `gpu_nodes -> leaf -> spine -> core`
 - the `frontend` fabric stays `gpu_nodes -> leaf -> spine`
-- the new `OOB` fabric is `gpu_nodes -> leaf -> spine` using the smaller `rack` grouping
+- the new `OOB` fabric is mixed-scope:
+  `gpu_nodes(rack) -> leaf(rack) -> spine(pod) -> core(global)`
 
 Port model:
 
 - each GPU exposes `3 x 1G` only to the `OOB` fabric
 - each OOB leaf receives `8 * 3 = 24` GPU downlinks and `4 x 1G` uplinks, using `28 / 48` total 1G lanes
-- OOB uses `4` global spines at `128 x 1G`
-- because current link semantics are full adjacency between adjacent layers, each OOB leaf connects to every OOB spine with `1 x 1G`, for `512` OOB leaf-to-spine rows total
+- OOB uses `4` pod-scoped spines per pod and `2` global cores
+- each rack leaf connects only to pod-local OOB spines through `to_ancestor_full_mesh`
+- each pod OOB spine uplinks to both global cores through `to_global_full_mesh`
 - OOB rows in the merged Excel output use resolved rack labels such as `pod_1_rack_1`

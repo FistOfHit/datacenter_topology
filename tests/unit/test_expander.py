@@ -79,7 +79,7 @@ def test_expand_topology_rejects_colliding_node_ids_during_schema_validation():
             {
                 "from": "compute",
                 "to": "pod_1_compute",
-                "policy": "group_to_global_full_mesh",
+                "policy": "to_global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 100,
             }
@@ -106,3 +106,79 @@ def test_expand_topology_duplicates_gpu_nodes_per_fabric_for_validation(multi_fa
     ]
     assert {node.fabric_name for node in shared_gpu_nodes} == {"backend", "frontend", "oob"}
     assert {node.group_label for node in shared_gpu_nodes} == {"pod_1", "pod_1_rack_1"}
+
+
+def test_expand_topology_pairs_child_scope_nodes_only_with_containing_ancestor_scope():
+    config = {
+        "groupings": [
+            {"name": "pod", "members_per_group": 2},
+            {"name": "rack", "members_per_group": 1},
+        ],
+        "gpu_nodes": {
+            "total_nodes": 4,
+            "fabric_port_layouts": {
+                "oob": {
+                    "base_lane_bandwidth_gb": 100,
+                    "total_lane_units": 1,
+                    "supported_port_modes": [
+                        {"port_bandwidth_gb": 100, "lane_units": 1}
+                    ],
+                }
+            },
+        },
+        "fabrics": [
+            {
+                "name": "oob",
+                "gpu_nodes_placement": "rack",
+                "layers": [
+                    {
+                        "name": "leaf",
+                        "placement": "rack",
+                        "nodes_per_group": 1,
+                        "port_layout": {
+                            "base_lane_bandwidth_gb": 100,
+                            "total_lane_units": 2,
+                            "supported_port_modes": [
+                                {"port_bandwidth_gb": 100, "lane_units": 1}
+                            ],
+                        },
+                    },
+                    {
+                        "name": "spine",
+                        "placement": "pod",
+                        "nodes_per_group": 1,
+                        "port_layout": {
+                            "base_lane_bandwidth_gb": 100,
+                            "total_lane_units": 2,
+                            "supported_port_modes": [
+                                {"port_bandwidth_gb": 100, "lane_units": 1}
+                            ],
+                        },
+                    },
+                ],
+                "links": [
+                    {
+                        "from": "gpu_nodes",
+                        "to": "leaf",
+                        "policy": "same_scope_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    },
+                    {
+                        "from": "leaf",
+                        "to": "spine",
+                        "policy": "to_ancestor_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    },
+                ],
+            }
+        ],
+    }
+
+    expanded = expand_topology(config)
+    links = {(link.source_node_id, link.target_node_id) for link in expanded.links}
+
+    assert ("oob__pod_1_rack_1_leaf_1", "oob__pod_1_spine_1") in links
+    assert ("oob__pod_1_rack_2_leaf_1", "oob__pod_1_spine_1") in links
+    assert ("oob__pod_1_rack_1_leaf_1", "oob__pod_2_spine_1") not in links

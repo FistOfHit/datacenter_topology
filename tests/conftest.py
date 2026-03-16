@@ -58,14 +58,14 @@ def grouped_config_dict() -> dict[str, object]:
             {
                 "from": "compute",
                 "to": "leaf",
-                "policy": "within_group_full_mesh",
+                "policy": "same_scope_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 100,
             },
             {
                 "from": "leaf",
                 "to": "spine",
-                "policy": "group_to_global_full_mesh",
+                "policy": "to_global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 100,
             },
@@ -94,7 +94,7 @@ def global_config_dict() -> dict[str, object]:
             {
                 "from": "spine",
                 "to": "core",
-                "policy": "global_to_global_full_mesh",
+                "policy": "global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 200,
             }
@@ -134,14 +134,14 @@ def mixed_speed_config_dict() -> dict[str, object]:
             {
                 "from": "Compute",
                 "to": "Leaf Switch",
-                "policy": "within_group_full_mesh",
+                "policy": "same_scope_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 400,
             },
             {
                 "from": "Leaf Switch",
                 "to": "Spine",
-                "policy": "group_to_global_full_mesh",
+                "policy": "to_global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 800,
             },
@@ -181,14 +181,14 @@ def two_pod_dense_config_dict() -> dict[str, object]:
             {
                 "from": "compute",
                 "to": "leaf",
-                "policy": "within_group_full_mesh",
+                "policy": "same_scope_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 200,
             },
             {
                 "from": "leaf",
                 "to": "spine",
-                "policy": "group_to_global_full_mesh",
+                "policy": "to_global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 200,
             },
@@ -234,21 +234,21 @@ def multi_pod_dense_config_dict() -> dict[str, object]:
             {
                 "from": "compute",
                 "to": "leaf",
-                "policy": "within_group_full_mesh",
+                "policy": "same_scope_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 200,
             },
             {
                 "from": "leaf",
                 "to": "spine",
-                "policy": "group_to_global_full_mesh",
+                "policy": "to_global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 200,
             },
             {
                 "from": "spine",
                 "to": "core",
-                "policy": "global_to_global_full_mesh",
+                "policy": "global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 200,
             },
@@ -279,11 +279,11 @@ def multi_fabric_config_dict() -> dict[str, object]:
         "fabrics": [
             {
                 "name": "backend",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "group",
+                        "placement": "pod",
                         "nodes_per_group": 1,
                         "port_layout": port_layout(100, 3, [(100, 1)]),
                     },
@@ -298,14 +298,14 @@ def multi_fabric_config_dict() -> dict[str, object]:
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     },
                     {
                         "from": "leaf",
                         "to": "spine",
-                        "policy": "group_to_global_full_mesh",
+                        "policy": "to_global_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     },
@@ -313,11 +313,11 @@ def multi_fabric_config_dict() -> dict[str, object]:
             },
             {
                 "name": "frontend",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "tor",
-                        "placement": "group",
+                        "placement": "pod",
                         "nodes_per_group": 1,
                         "port_layout": port_layout(50, 2, [(50, 1)]),
                     }
@@ -326,7 +326,7 @@ def multi_fabric_config_dict() -> dict[str, object]:
                     {
                         "from": "gpu_nodes",
                         "to": "tor",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 50,
                     }
@@ -334,7 +334,7 @@ def multi_fabric_config_dict() -> dict[str, object]:
             },
             {
                 "name": "oob",
-                "grouping": "rack",
+                "gpu_nodes_placement": "rack",
                 "layers": [
                     {
                         "name": "mgmt",
@@ -347,7 +347,7 @@ def multi_fabric_config_dict() -> dict[str, object]:
                     {
                         "from": "gpu_nodes",
                         "to": "mgmt",
-                        "policy": "group_to_global_full_mesh",
+                        "policy": "to_global_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 25,
                     }

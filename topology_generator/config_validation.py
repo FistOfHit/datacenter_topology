@@ -4,7 +4,6 @@ from collections.abc import Sequence
 
 from topology_generator.config_identifiers import (
     GPU_NODES_LAYER_NAME,
-    MULTI_FABRIC_GROUP_PLACEMENT,
     SUPPORTED_LINK_POLICIES,
     build_fabric_qualified_node_id,
     build_global_node_id,
@@ -64,35 +63,17 @@ def _validate_multi_fabric_semantics(config: TopologyConfig) -> None:
         _validate_grouping_name_uniqueness(config.groupings)
         _validate_grouping_reserved_names(config)
         _validate_grouping_sizes(config)
-    elif any(fabric.grouping is not None for fabric in config.fabrics):
-        raise InvalidTopologyConfig(
-            "fabrics[*].grouping requires at least one declared grouping."
-        )
     _validate_gpu_nodes_fabric_mappings(config)
 
     for fabric in config.fabrics:
-        if fabric.grouping is None:
-            if any(layer.placement != "global" for layer in fabric.layers):
-                raise InvalidTopologyConfig(
-                    f"fabrics[{fabric.index}].grouping is required when a fabric "
-                    "contains grouped layers."
-                )
-        else:
+        if fabric.gpu_nodes_placement != "global":
             try:
-                config.grouping(fabric.grouping)
+                config.grouping(fabric.gpu_nodes_placement)
             except KeyError as exc:
                 raise InvalidTopologyConfig(
-                    f"fabrics[{fabric.index}].grouping references unknown grouping "
-                    f"{fabric.grouping!r}."
+                    f"fabrics[{fabric.index}].gpu_nodes_placement references unknown "
+                    f"grouping {fabric.gpu_nodes_placement!r}."
                 ) from exc
-
-        if (
-            fabric.grouping is None
-            and config.gpu_nodes_layer_for_fabric(fabric.name).placement != "global"
-        ):
-            raise InvalidTopologyConfig(
-                f"fabrics[{fabric.index}] resolved an invalid shared endpoint placement."
-            )
 
         _validate_name_uniqueness(
             fabric.layers,
@@ -112,11 +93,15 @@ def _validate_multi_fabric_semantics(config: TopologyConfig) -> None:
             is_multi_fabric_layers=True,
         )
         effective_layers = (config.gpu_nodes_layer_for_fabric(fabric.name), *fabric.layers)
+        _validate_layer_scope_monotonicity(
+            config,
+            effective_layers,
+            f"fabrics[{fabric.index}]",
+        )
         _validate_expanded_node_id_uniqueness(
             config,
             effective_layers,
             fabric_name=fabric.name,
-            grouping_name=fabric.grouping,
         )
         _validate_links(
             config,
@@ -127,7 +112,7 @@ def _validate_multi_fabric_semantics(config: TopologyConfig) -> None:
 
 
 def _validate_grouping_reserved_names(config: TopologyConfig) -> None:
-    reserved_names = {"global", MULTI_FABRIC_GROUP_PLACEMENT, GPU_NODES_LAYER_NAME}
+    reserved_names = {"global", GPU_NODES_LAYER_NAME}
     for grouping in config.groupings:
         normalized_name = normalize_identifier(grouping.name)
         if normalized_name in reserved_names:
@@ -203,7 +188,7 @@ def _validate_layer_placements(
     is_multi_fabric_layers: bool = False,
 ) -> None:
     if is_multi_fabric_layers:
-        available_placements = {"global", MULTI_FABRIC_GROUP_PLACEMENT}
+        available_placements = {"global", *(grouping.name for grouping in config.groupings)}
     else:
         group_names = [group.name for group in config.groups]
         available_placements = {"global", *group_names}
@@ -213,14 +198,52 @@ def _validate_layer_placements(
             if is_multi_fabric_layers:
                 raise InvalidTopologyConfig(
                     f"{_layer_path(path_prefix, layer, True)}.placement must be "
-                    "'global' or 'group' in multi-fabric mode; use "
-                    "'placement: group' for grouping-relative layers."
+                    "'global' or one of the declared grouping names in multi-fabric "
+                    f"mode: {sorted(name for name in available_placements if name != 'global')!r}."
                 )
             raise InvalidTopologyConfig(
                 f"{_layer_path(path_prefix, layer, False)}.placement must be "
                 "'global' or one of the declared groups: "
                 f"{sorted(name for name in available_placements if name != 'global')!r}."
             )
+
+
+def _validate_layer_scope_monotonicity(
+    config: TopologyConfig,
+    layers: Sequence[LayerConfig],
+    path_prefix: str,
+) -> None:
+    for lower_layer, upper_layer in zip(layers[:-1], layers[1:]):
+        if lower_layer.placement == upper_layer.placement:
+            continue
+        if upper_layer.placement == "global":
+            continue
+        if lower_layer.placement == "global":
+            raise InvalidTopologyConfig(
+                f"{path_prefix} widens and narrows scope invalidly: layer "
+                f"{upper_layer.name!r} cannot narrow placement below global."
+            )
+        if not _is_ancestor_scope(config, upper_layer.placement, lower_layer.placement):
+            raise InvalidTopologyConfig(
+                f"{path_prefix} must widen scope monotonically: "
+                f"{lower_layer.name!r} uses {lower_layer.placement!r} but "
+                f"{upper_layer.name!r} uses incompatible placement "
+                f"{upper_layer.placement!r}."
+            )
+
+
+def _is_ancestor_scope(
+    config: TopologyConfig,
+    ancestor_scope: str,
+    descendant_scope: str,
+) -> bool:
+    if ancestor_scope == descendant_scope:
+        return False
+    try:
+        descendant_chain = config.scope_names_for_scope(descendant_scope)
+    except KeyError:
+        return False
+    return ancestor_scope in descendant_chain[:-1]
 
 
 def _validate_links(
@@ -263,41 +286,55 @@ def _validate_links(
 
         lower_layer = next(layer for layer in layers if layer.index == lower_index)
         upper_layer = next(layer for layer in layers if layer.index == upper_index)
-        _validate_link_policy(link, lower_layer, upper_layer, path_prefix)
+        _validate_link_policy(config, link, lower_layer, upper_layer, path_prefix)
         _validate_link_bandwidth_support(link, lower_layer, upper_layer, path_prefix)
 
 
 def _validate_link_policy(
+    config: TopologyConfig,
     link: LinkConfig,
     lower_layer: LayerConfig,
     upper_layer: LayerConfig,
     path_prefix: str,
 ) -> None:
-    if link.policy == "within_group_full_mesh":
+    if link.policy == "same_scope_full_mesh":
         if lower_layer.placement == "global" or upper_layer.placement == "global":
             raise InvalidTopologyConfig(
-                "within_group_full_mesh requires both layers to use the same "
+                "same_scope_full_mesh requires both layers to use the same "
                 f"non-global placement: {path_prefix}[{link.index}]."
             )
         if lower_layer.placement != upper_layer.placement:
             raise InvalidTopologyConfig(
-                "within_group_full_mesh requires both layers to share the same "
+                "same_scope_full_mesh requires both layers to share the same "
                 f"placement: {path_prefix}[{link.index}]."
             )
         return
 
-    if link.policy == "group_to_global_full_mesh":
+    if link.policy == "to_ancestor_full_mesh":
+        if lower_layer.placement == "global" or upper_layer.placement == "global":
+            raise InvalidTopologyConfig(
+                "to_ancestor_full_mesh requires both layers to use non-global "
+                f"placements: {path_prefix}[{link.index}]."
+            )
+        if not _is_ancestor_scope(config, upper_layer.placement, lower_layer.placement):
+            raise InvalidTopologyConfig(
+                "to_ancestor_full_mesh requires the target placement to be a strict "
+                f"ancestor of the source placement: {path_prefix}[{link.index}]."
+            )
+        return
+
+    if link.policy == "to_global_full_mesh":
         if lower_layer.placement == "global" or upper_layer.placement != "global":
             raise InvalidTopologyConfig(
-                "group_to_global_full_mesh requires a grouped source layer and a "
+                "to_global_full_mesh requires a grouped source layer and a "
                 f"global target layer: {path_prefix}[{link.index}]."
             )
         return
 
-    if link.policy == "global_to_global_full_mesh":
+    if link.policy == "global_full_mesh":
         if lower_layer.placement != "global" or upper_layer.placement != "global":
             raise InvalidTopologyConfig(
-                "global_to_global_full_mesh requires both layers to use global "
+                "global_full_mesh requires both layers to use global "
                 f"placement: {path_prefix}[{link.index}]."
             )
         return
@@ -328,23 +365,14 @@ def _validate_expanded_node_id_uniqueness(
     config: TopologyConfig,
     layers: Sequence[LayerConfig],
     fabric_name: str | None = None,
-    grouping_name: str | None = None,
 ) -> None:
     seen_node_ids: dict[str, str] = {}
     group = config.group()
     single_fabric_group_indexes = range(1, group.count + 1) if group else ()
-    multi_fabric_group_indexes = (
-        range(1, config.grouping_count(grouping_name) + 1)
-        if grouping_name is not None
-        else range(0)
-    )
 
     for layer in layers:
         if layer.placement == "global":
-            node_ids = tuple(
-                build_global_node_id(layer.name, ordinal)
-                for ordinal in range(1, layer.nodes_per_group + 1)
-            )
+            node_ids = _global_node_ids(layer, fabric_name)
         elif fabric_name is None:
             node_ids = tuple(
                 build_grouped_node_id(layer.placement, group_index, layer.name, ordinal)
@@ -352,13 +380,12 @@ def _validate_expanded_node_id_uniqueness(
                 for ordinal in range(1, layer.nodes_per_group + 1)
             )
         else:
-            assert grouping_name is not None
             node_ids_list: list[str] = []
-            for group_index in multi_fabric_group_indexes:
+            for group_index in range(1, config.scope_instance_count(layer.placement) + 1):
                 if layer.name == GPU_NODES_LAYER_NAME:
                     for local_ordinal in range(1, layer.nodes_per_group + 1):
                         physical_ordinal = config.physical_node_ordinal(
-                            grouping_name,
+                            layer.placement,
                             group_index,
                             local_ordinal,
                         )
@@ -370,7 +397,7 @@ def _validate_expanded_node_id_uniqueness(
                         )
                     continue
 
-                group_label = config.group_label_for_group(grouping_name, group_index)
+                group_label = config.group_label_for_group(layer.placement, group_index)
                 for ordinal in range(1, layer.nodes_per_group + 1):
                     node_ids_list.append(
                         build_fabric_qualified_node_id(
@@ -389,6 +416,22 @@ def _validate_expanded_node_id_uniqueness(
                     f"{node_id!r}."
                 )
             seen_node_ids[node_id] = layer.name
+
+
+def _global_node_ids(
+    layer: LayerConfig,
+    fabric_name: str | None,
+) -> tuple[str, ...]:
+    node_ids = tuple(
+        build_global_node_id(layer.name, ordinal)
+        for ordinal in range(1, layer.nodes_per_group + 1)
+    )
+    if fabric_name is None or layer.name == GPU_NODES_LAYER_NAME:
+        return node_ids
+    return tuple(
+        build_fabric_qualified_node_id(fabric_name, node_id)
+        for node_id in node_ids
+    )
 
 
 def _validate_name_uniqueness(

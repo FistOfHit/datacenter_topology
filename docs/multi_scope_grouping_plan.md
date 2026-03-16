@@ -1,10 +1,17 @@
 # Multi-Scope Grouping Plan
 
-This document is a forward-looking proposal, not current shipped behavior.
+This document captures the original planning work for a feature that is now
+shipped. The authoritative current behavior lives in
+[configuration.md](configuration.md) and [architecture.md](architecture.md).
 
-- Use [configuration.md](configuration.md) for the authoritative current
-  multi-fabric schema.
-- Use [architecture.md](architecture.md) for the current implementation model.
+The final shipped public names differ from parts of the original proposal:
+
+- `gpu_nodes_placement` shipped instead of `shared_endpoint_placement`
+- `same_scope_full_mesh`, `to_ancestor_full_mesh`, `to_global_full_mesh`, and
+  `global_full_mesh` shipped instead of the earlier policy names
+
+- Treat the remainder of this file as historical planning context rather than
+  the normative config contract.
 
 ## Summary
 

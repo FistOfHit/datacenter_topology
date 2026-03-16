@@ -47,6 +47,8 @@ Key guarantees:
 - link policies must match endpoint placement semantics
 - lane-based port math must be valid on every layer
 - `gpu_nodes` is the only shared layer in multi-fabric mode
+- multi-fabric layers carry explicit literal scope placements such as `rack`,
+  `pod`, or `global`
 
 ### `expander.py`
 
@@ -54,7 +56,7 @@ Expansion converts validated grouped config into concrete topology intent:
 
 - concrete nodes
 - concrete full-mesh link bundles
-- resolved group labels for grouped layers
+- ancestry-aware scope metadata for grouped layers
 - per-end lane consumption for each cable bandwidth
 
 Expansion is intentionally graph-free. It produces a deterministic intermediate
@@ -84,7 +86,7 @@ It is responsible for:
 - graph node creation
 - graph edge creation
 - deterministic contiguous lane allocation per cable
-- storing usage metadata on nodes and allocation metadata on edges
+- storing usage metadata, scope-path metadata, and allocation metadata
 - merging multi-fabric runs into one graph while preserving per-fabric views
 
 ### Render pipeline
@@ -105,6 +107,7 @@ Stable rendering behavior:
 
 - large grouped layers are rendered in condensed form
 - only the first and last visible groups/nodes are shown when counts are large
+- nested scope boxes are shown for multi-scope fabrics
 - global layers are kept visually separate from grouped layers
 - aggregate bandwidth and fanout annotations come from graph metadata
 - multi-fabric runs are rendered through isolated per-fabric graph views
@@ -146,8 +149,9 @@ pattern between those two layers.
 ### Multi-fabric mode shares only `gpu_nodes`
 
 Multi-fabric mode uses one shared layer-0 endpoint population, exposed in YAML
-as `gpu_nodes`. Each fabric selects one grouping namespace and builds an
-otherwise isolated topology above that shared endpoint layer.
+as `gpu_nodes`. Each fabric declares a `gpu_nodes_placement` and then assigns
+literal placements to each fabric-local layer, allowing one fabric to treat the
+shared endpoints as `pod` scoped while another treats them as `rack` scoped.
 
 ### Shared endpoints remain physically shared but logically fabric-local
 
@@ -155,6 +159,14 @@ During expansion and validation, shared GPU nodes are duplicated per fabric so
 capacity checks remain isolated. During graph materialization, those fabrics map
 back onto shared physical graph node IDs so downstream consumers can still view
 one combined topology.
+
+### Scope widening is explicit
+
+Multi-fabric placements must widen monotonically as layers move upward.
+Adjacent layers may stay in the same scope, move to an ancestor scope, or move
+to `global`, but may not narrow. Link policies mirror that model through
+`same_scope_full_mesh`, `to_ancestor_full_mesh`, `to_global_full_mesh`, and
+`global_full_mesh`.
 
 ### Lane units are the hardware budget
 

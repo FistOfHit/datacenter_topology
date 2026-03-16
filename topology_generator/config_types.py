@@ -7,7 +7,6 @@ from typing import Any
 
 from topology_generator.config_identifiers import (
     GPU_NODES_LAYER_NAME,
-    MULTI_FABRIC_GROUP_PLACEMENT,
     bandwidth_decimal,
     normalize_identifier,
 )
@@ -145,19 +144,17 @@ class LinkConfig:
 class FabricConfig:
     index: int
     name: str
-    grouping: str | None
+    gpu_nodes_placement: str
     layers: tuple[LayerConfig, ...]
     links: tuple[LinkConfig, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        data = {
+        return {
             "name": self.name,
+            "gpu_nodes_placement": self.gpu_nodes_placement,
             "layers": [layer.to_dict() for layer in self.layers],
             "links": [link.to_dict() for link in self.links],
         }
-        if self.grouping is not None:
-            data["grouping"] = self.grouping
-        return data
 
 
 @dataclass(frozen=True)
@@ -203,8 +200,6 @@ class GpuNodesConfig:
 @dataclass(frozen=True)
 class EffectiveFabricConfig:
     name: str | None
-    grouping_name: str | None
-    group_count: int | None
     layers: tuple[LayerConfig, ...]
     links: tuple[LinkConfig, ...]
 
@@ -216,12 +211,6 @@ class EffectiveFabricConfig:
             if layer.name == layer_ref:
                 return layer
         raise KeyError(layer_ref)
-
-    def group_indexes(self) -> range:
-        if self.group_count is None:
-            return range(0)
-        return range(1, self.group_count + 1)
-
 
 @dataclass(frozen=True)
 class TopologyConfig(Mapping[str, Any]):
@@ -265,15 +254,21 @@ class TopologyConfig(Mapping[str, Any]):
             raise KeyError(grouping_name)
         return self.gpu_nodes.total_nodes // self.grouping(grouping_name).members_per_group
 
-    def group_label_for_group(self, grouping_name: str, group_index: int) -> str:
-        grouping = self.grouping(grouping_name)
-        start_ordinal = ((group_index - 1) * grouping.members_per_group) + 1
-        return self.group_label_for_ordinal(grouping_name, start_ordinal)
+    def scope_instance_count(self, scope_name: str) -> int:
+        return self.grouping_count(scope_name)
 
-    def group_label_for_ordinal(self, grouping_name: str, physical_ordinal: int) -> str:
-        grouping = self.grouping(grouping_name)
+    def scope_names_for_scope(self, scope_name: str) -> tuple[str, ...]:
+        grouping = self.grouping(scope_name)
+        return tuple(group.name for group in self._grouping_chain(grouping))
+
+    def scope_indexes_for_ordinal(
+        self,
+        scope_name: str,
+        physical_ordinal: int,
+    ) -> tuple[int, ...]:
+        grouping = self.grouping(scope_name)
         zero_based_ordinal = physical_ordinal - 1
-        label_parts: list[str] = []
+        scope_indexes: list[int] = []
         previous_group_size: int | None = None
         for ancestor in self._grouping_chain(grouping):
             if previous_group_size is None:
@@ -283,9 +278,43 @@ class TopologyConfig(Mapping[str, Any]):
                     (zero_based_ordinal % previous_group_size)
                     // ancestor.members_per_group
                 ) + 1
-            label_parts.append(f"{ancestor.name}_{local_index}")
+            scope_indexes.append(local_index)
             previous_group_size = ancestor.members_per_group
-        return "_".join(label_parts)
+        return tuple(scope_indexes)
+
+    def scope_labels_for_ordinal(
+        self,
+        scope_name: str,
+        physical_ordinal: int,
+    ) -> tuple[str, ...]:
+        scope_names = self.scope_names_for_scope(scope_name)
+        scope_indexes = self.scope_indexes_for_ordinal(scope_name, physical_ordinal)
+        labels: list[str] = []
+        for offset in range(1, len(scope_names) + 1):
+            parts = [
+                f"{scope_names[index]}_{scope_indexes[index]}"
+                for index in range(offset)
+            ]
+            labels.append("_".join(parts))
+        return tuple(labels)
+
+    def scope_key_for_ordinal(
+        self,
+        scope_name: str,
+        physical_ordinal: int,
+    ) -> tuple[tuple[str, int], ...]:
+        scope_names = self.scope_names_for_scope(scope_name)
+        scope_indexes = self.scope_indexes_for_ordinal(scope_name, physical_ordinal)
+        return tuple(zip(scope_names, scope_indexes, strict=True))
+
+    def group_label_for_group(self, grouping_name: str, group_index: int) -> str:
+        grouping = self.grouping(grouping_name)
+        start_ordinal = ((group_index - 1) * grouping.members_per_group) + 1
+        return self.group_label_for_ordinal(grouping_name, start_ordinal)
+
+    def group_label_for_ordinal(self, grouping_name: str, physical_ordinal: int) -> str:
+        labels = self.scope_labels_for_ordinal(grouping_name, physical_ordinal)
+        return labels[-1]
 
     def physical_node_ordinal(
         self,
@@ -317,12 +346,12 @@ class TopologyConfig(Mapping[str, Any]):
         if self.gpu_nodes is None:
             raise KeyError(fabric_name)
         fabric = self.fabric(fabric_name)
-        if fabric.grouping is None:
+        if fabric.gpu_nodes_placement == "global":
             placement = "global"
             nodes_per_group = self.gpu_nodes.total_nodes
         else:
-            placement = MULTI_FABRIC_GROUP_PLACEMENT
-            nodes_per_group = self.grouping(fabric.grouping).members_per_group
+            placement = fabric.gpu_nodes_placement
+            nodes_per_group = self.grouping(fabric.gpu_nodes_placement).members_per_group
         return LayerConfig(
             index=0,
             name=GPU_NODES_LAYER_NAME,
@@ -333,12 +362,9 @@ class TopologyConfig(Mapping[str, Any]):
 
     def iter_fabrics(self) -> tuple[EffectiveFabricConfig, ...]:
         if not self.is_multi_fabric:
-            group = self.group()
             return (
                 EffectiveFabricConfig(
                     name=None,
-                    grouping_name=None,
-                    group_count=group.count if group is not None else None,
                     layers=self.layers,
                     links=self.links,
                 ),
@@ -347,12 +373,6 @@ class TopologyConfig(Mapping[str, Any]):
         return tuple(
             EffectiveFabricConfig(
                 name=fabric.name,
-                grouping_name=fabric.grouping,
-                group_count=(
-                    self.grouping_count(fabric.grouping)
-                    if fabric.grouping is not None
-                    else None
-                ),
                 layers=(self.gpu_nodes_layer_for_fabric(fabric.name), *fabric.layers),
                 links=fabric.links,
             )

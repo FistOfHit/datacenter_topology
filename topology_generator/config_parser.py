@@ -192,17 +192,28 @@ def _parse_fabric(raw_fabric: Any, index: int) -> FabricConfig:
     if not isinstance(raw_links, Sequence) or isinstance(raw_links, (str, bytes)):
         raise InvalidTopologyConfig(f"{path}.links must be a list of link mappings.")
 
-    grouping = raw_fabric.get("grouping")
-    if not isinstance(grouping, str) or not grouping.strip():
+    if "grouping" in raw_fabric:
         raise InvalidTopologyConfig(
-            f"{path}.grouping is required in multi-fabric configs; declare a top-level "
-            "groupings entry and reference it here."
+            f"{path}.grouping is no longer supported in multi-fabric configs; "
+            "use gpu_nodes_placement instead."
+        )
+    if "shared_endpoint_placement" in raw_fabric:
+        raise InvalidTopologyConfig(
+            f"{path}.shared_endpoint_placement is not supported; use "
+            "gpu_nodes_placement instead."
+        )
+
+    gpu_nodes_placement = raw_fabric.get("gpu_nodes_placement")
+    if not isinstance(gpu_nodes_placement, str) or not gpu_nodes_placement.strip():
+        raise InvalidTopologyConfig(
+            f"{path}.gpu_nodes_placement is required in multi-fabric configs; "
+            "declare 'global' or a top-level grouping name."
         )
 
     return FabricConfig(
         index=index,
         name=_required_name(raw_fabric, path),
-        grouping=grouping.strip(),
+        gpu_nodes_placement=gpu_nodes_placement.strip(),
         layers=tuple(
             _parse_layer(
                 raw_layer,
@@ -229,10 +240,17 @@ def _parse_layer(raw_layer: Any, index: int, path: str) -> LayerConfig:
             "port_layout block."
         )
 
+    placement = _required_string(raw_layer, "placement", path)
+    if placement == "group":
+        raise InvalidTopologyConfig(
+            f"{path}.placement no longer accepts 'group'; use a literal grouping "
+            "name such as 'rack' or 'pod'."
+        )
+
     return LayerConfig(
         index=index,
         name=_required_name(raw_layer, path),
-        placement=_required_string(raw_layer, "placement", path),
+        placement=placement,
         nodes_per_group=_require_positive_int(raw_layer, "nodes_per_group", path),
         port_layout=_parse_port_layout(raw_layer.get("port_layout"), f"{path}.port_layout"),
     )
@@ -337,6 +355,16 @@ def _parse_link(raw_link: Any, index: int, path: str) -> LinkConfig:
         )
 
     policy = _required_string(raw_link, "policy", path)
+    replacement_by_policy = {
+        "within_group_full_mesh": "same_scope_full_mesh",
+        "group_to_global_full_mesh": "to_global_full_mesh",
+        "global_to_global_full_mesh": "global_full_mesh",
+    }
+    if policy in replacement_by_policy:
+        raise InvalidTopologyConfig(
+            f"{path}.policy {policy!r} is no longer supported; use "
+            f"{replacement_by_policy[policy]!r} instead."
+        )
     if policy not in SUPPORTED_LINK_POLICIES:
         raise InvalidTopologyConfig(
             f"{path}.policy must be one of {sorted(SUPPORTED_LINK_POLICIES)!r}."

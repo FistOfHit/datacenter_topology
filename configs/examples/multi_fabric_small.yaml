@@ -28,10 +28,10 @@ gpu_nodes:
 
 fabrics:
   - name: backend
-    grouping: pod
+    gpu_nodes_placement: pod
     layers:
       - name: leaf
-        placement: group
+        placement: pod
         nodes_per_group: 1
         port_layout:
           base_lane_bandwidth_gb: 100
@@ -51,20 +51,20 @@ fabrics:
     links:
       - from: gpu_nodes
         to: leaf
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 100
       - from: leaf
         to: spine
-        policy: group_to_global_full_mesh
+        policy: to_global_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 100
 
   - name: frontend
-    grouping: pod
+    gpu_nodes_placement: pod
     layers:
       - name: tor
-        placement: group
+        placement: pod
         nodes_per_group: 1
         port_layout:
           base_lane_bandwidth_gb: 50
@@ -75,12 +75,12 @@ fabrics:
     links:
       - from: gpu_nodes
         to: tor
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 50
 
   - name: oob
-    grouping: rack
+    gpu_nodes_placement: rack
     layers:
       - name: mgmt
         placement: global
@@ -94,6 +94,6 @@ fabrics:
     links:
       - from: gpu_nodes
         to: mgmt
-        policy: group_to_global_full_mesh
+        policy: to_global_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 25

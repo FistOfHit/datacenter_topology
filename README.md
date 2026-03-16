@@ -111,6 +111,10 @@ fabrics:
   - ...
 ```
 
+In multi-fabric mode, each fabric declares `gpu_nodes_placement` and each
+fabric-local layer uses a literal `placement` such as `rack`, `pod`, or
+`global`.
+
 Use [Configuration Reference](docs/configuration.md) for the canonical schema
 and validation rules.
 

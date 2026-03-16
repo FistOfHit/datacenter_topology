@@ -13,6 +13,12 @@ from topology_generator.topology_generator import (
 )
 
 
+def build_topology_title(fabric_name: str | None = None) -> str:
+    if fabric_name is None:
+        return "Network Topology"
+    return f"{fabric_name} topology"
+
+
 def visualize_topology(
     graph: nx.Graph,
     output_dir: str | PathLike[str] | None = None,
@@ -26,7 +32,7 @@ def visualize_topology(
                 calculate_layout(fabric_graph, render_summary),
                 output_dir,
                 filename=f"topology_{build_fabric_output_name(fabric_name)}.png",
-                title=f"Network Topology ({fabric_name})",
+                title=build_topology_title(fabric_name),
                 render_summary=render_summary,
             )
         return
@@ -36,5 +42,6 @@ def visualize_topology(
         graph,
         calculate_layout(graph, render_summary),
         output_dir,
+        title=build_topology_title(),
         render_summary=render_summary,
     )

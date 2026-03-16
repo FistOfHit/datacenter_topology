@@ -16,6 +16,11 @@ class NodeAttrs(TypedDict, total=False):
     layer_index: int
     layer_name: str
     placement: str
+    placement_scope: str | None
+    scope_names: tuple[str, ...]
+    scope_indexes: tuple[int, ...]
+    scope_labels: tuple[str, ...]
+    scope_key: tuple[tuple[str, int], ...]
     group_name: str | None
     group_index: int | None
     group_label: str | None
@@ -144,12 +149,17 @@ def node_sort_key(
 ) -> tuple[object, ...]:
     if natural_key is None:
         natural_key = natural_sort_key(node_id)
-    group_order = attrs.get("group_order")
+    scope_indexes = attrs.get("scope_indexes")
+    normalized_scope_indexes = (
+        tuple(scope_indexes)
+        if isinstance(scope_indexes, tuple)
+        else ()
+    )
     node_ordinal = attrs.get("node_ordinal", 0)
     return (
         attrs["layer_index"],
-        1 if group_order is None else 0,
-        group_order or 0,
+        1 if not normalized_scope_indexes else 0,
+        normalized_scope_indexes,
         node_ordinal,
         natural_key,
     )

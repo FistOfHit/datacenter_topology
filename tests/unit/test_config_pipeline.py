@@ -110,7 +110,7 @@ def test_topology_config_accepts_fractional_bandwidths():
             {
                 "from": "leaf",
                 "to": "spine",
-                "policy": "global_to_global_full_mesh",
+                "policy": "global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 0.3,
             }
@@ -176,7 +176,7 @@ def test_topology_config_rejects_expanded_node_id_collisions():
             {
                 "from": "compute",
                 "to": "pod_1_compute",
-                "policy": "group_to_global_full_mesh",
+                "policy": "to_global_full_mesh",
                 "cables_per_pair": 1,
                 "cable_bandwidth_gb": 100,
             }
@@ -197,7 +197,7 @@ def test_topology_config_accepts_multi_fabric_gpu_nodes_schema(multi_fabric_conf
     assert config.grouping("rack").members_per_group == 1
     assert config.fabric_names == ("backend", "frontend", "oob")
     assert config.gpu_nodes.port_layout_for_fabric("backend").total_lane_units == 1
-    assert config.fabric("oob").grouping == "rack"
+    assert config.fabric("oob").gpu_nodes_placement == "rack"
 
 
 def test_topology_config_rejects_mismatched_gpu_nodes_fabric_names(multi_fabric_config):
@@ -250,11 +250,11 @@ def test_topology_config_accepts_normalized_fabric_port_layout_name_matches():
         "fabrics": [
             {
                 "name": "front-end",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "group",
+                        "placement": "pod",
                         "nodes_per_group": 1,
                         "port_layout": {
                             "base_lane_bandwidth_gb": 100,
@@ -272,7 +272,7 @@ def test_topology_config_accepts_normalized_fabric_port_layout_name_matches():
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }
@@ -313,7 +313,7 @@ def test_topology_config_reports_correct_multi_fabric_layer_path_for_placement_e
         "fabrics": [
             {
                 "name": "backend",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "leaf",
@@ -387,7 +387,7 @@ def test_topology_config_rejects_legacy_multi_fabric_groups_shape():
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }
@@ -445,7 +445,7 @@ def test_topology_config_rejects_missing_groupings_in_multi_fabric_mode():
                     {
                         "from": "gpu_nodes",
                         "to": "mgmt",
-                        "policy": "global_to_global_full_mesh",
+                        "policy": "global_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }
@@ -487,11 +487,11 @@ def test_topology_config_rejects_legacy_gpu_nodes_nodes_per_group():
         "fabrics": [
             {
                 "name": "backend",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "group",
+                        "placement": "pod",
                         "nodes_per_group": 1,
                         "port_layout": {
                             "base_lane_bandwidth_gb": 100,
@@ -509,7 +509,7 @@ def test_topology_config_rejects_legacy_gpu_nodes_nodes_per_group():
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }
@@ -525,7 +525,7 @@ def test_topology_config_rejects_legacy_gpu_nodes_nodes_per_group():
         TopologyConfig.from_mapping(config)
 
 
-def test_topology_config_rejects_missing_fabric_grouping():
+def test_topology_config_rejects_missing_gpu_nodes_placement():
     config = {
         "groupings": [
             {
@@ -572,7 +572,7 @@ def test_topology_config_rejects_missing_fabric_grouping():
                     {
                         "from": "gpu_nodes",
                         "to": "mgmt",
-                        "policy": "global_to_global_full_mesh",
+                        "policy": "global_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }
@@ -583,8 +583,69 @@ def test_topology_config_rejects_missing_fabric_grouping():
 
     with pytest.raises(
         InvalidTopologyConfig,
-        match=r"fabrics\[0\]\.grouping is required in multi-fabric configs",
+        match=r"fabrics\[0\]\.gpu_nodes_placement is required in multi-fabric configs",
     ):
+        TopologyConfig.from_mapping(config)
+
+
+def test_topology_config_rejects_grouped_first_hop_when_gpu_nodes_are_global():
+    config = {
+        "groupings": [
+            {
+                "name": "pod",
+                "members_per_group": 2,
+            }
+        ],
+        "gpu_nodes": {
+            "total_nodes": 2,
+            "fabric_port_layouts": {
+                "backend": {
+                    "base_lane_bandwidth_gb": 100,
+                    "total_lane_units": 1,
+                    "supported_port_modes": [
+                        {
+                            "port_bandwidth_gb": 100,
+                            "lane_units": 1,
+                        }
+                    ],
+                }
+            },
+        },
+        "fabrics": [
+            {
+                "name": "backend",
+                "gpu_nodes_placement": "global",
+                "layers": [
+                    {
+                        "name": "leaf",
+                        "placement": "pod",
+                        "nodes_per_group": 1,
+                        "port_layout": {
+                            "base_lane_bandwidth_gb": 100,
+                            "total_lane_units": 2,
+                            "supported_port_modes": [
+                                {
+                                    "port_bandwidth_gb": 100,
+                                    "lane_units": 1,
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "links": [
+                    {
+                        "from": "gpu_nodes",
+                        "to": "leaf",
+                        "policy": "same_scope_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(InvalidTopologyConfig, match="cannot narrow placement below global"):
         TopologyConfig.from_mapping(config)
 
 
@@ -614,11 +675,11 @@ def test_topology_config_rejects_legacy_multi_fabric_group_placement_name():
         "fabrics": [
             {
                 "name": "backend",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "pod",
+                        "placement": "group",
                         "nodes_per_group": 1,
                         "port_layout": {
                             "base_lane_bandwidth_gb": 100,
@@ -636,7 +697,7 @@ def test_topology_config_rejects_legacy_multi_fabric_group_placement_name():
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }
@@ -647,7 +708,7 @@ def test_topology_config_rejects_legacy_multi_fabric_group_placement_name():
 
     with pytest.raises(
         InvalidTopologyConfig,
-        match=r"must be 'global' or 'group' in multi-fabric mode",
+        match=r"placement no longer accepts 'group'",
     ):
         TopologyConfig.from_mapping(config)
 
@@ -678,11 +739,11 @@ def test_topology_config_rejects_reserved_gpu_nodes_grouping_name():
         "fabrics": [
             {
                 "name": "backend",
-                "grouping": "gpu_nodes",
+                "gpu_nodes_placement": "gpu_nodes",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "group",
+                        "placement": "gpu_nodes",
                         "nodes_per_group": 1,
                         "port_layout": {
                             "base_lane_bandwidth_gb": 100,
@@ -700,7 +761,7 @@ def test_topology_config_rejects_reserved_gpu_nodes_grouping_name():
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }

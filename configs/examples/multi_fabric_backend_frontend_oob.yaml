@@ -28,10 +28,10 @@ gpu_nodes:
 
 fabrics:
   - name: backend
-    grouping: pod
+    gpu_nodes_placement: pod
     layers:
       - name: leaf
-        placement: group
+        placement: pod
         nodes_per_group: 8
         port_layout:
           base_lane_bandwidth_gb: 400
@@ -43,7 +43,7 @@ fabrics:
               lane_units: 2
 
       - name: spine
-        placement: group
+        placement: pod
         nodes_per_group: 8
         port_layout:
           base_lane_bandwidth_gb: 400
@@ -69,27 +69,27 @@ fabrics:
     links:
       - from: gpu_nodes
         to: leaf
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 400
 
       - from: leaf
         to: spine
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 8
         cable_bandwidth_gb: 400
 
       - from: spine
         to: core
-        policy: group_to_global_full_mesh
+        policy: to_global_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 400
 
   - name: frontend
-    grouping: pod
+    gpu_nodes_placement: pod
     layers:
       - name: leaf
-        placement: group
+        placement: pod
         nodes_per_group: 2
         port_layout:
           base_lane_bandwidth_gb: 400
@@ -102,7 +102,7 @@ fabrics:
 
       - name: spine
         placement: global
-        nodes_per_group: 8
+        nodes_per_group: 16
         port_layout:
           base_lane_bandwidth_gb: 400
           total_lane_units: 128
@@ -115,21 +115,21 @@ fabrics:
     links:
       - from: gpu_nodes
         to: leaf
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 400
 
       - from: leaf
         to: spine
-        policy: group_to_global_full_mesh
+        policy: to_global_full_mesh
         cables_per_pair: 4
         cable_bandwidth_gb: 400
 
   - name: OOB
-    grouping: rack
+    gpu_nodes_placement: rack
     layers:
       - name: leaf
-        placement: group
+        placement: rack
         nodes_per_group: 1
         port_layout:
           base_lane_bandwidth_gb: 1
@@ -139,8 +139,18 @@ fabrics:
               lane_units: 1
 
       - name: spine
-        placement: global
+        placement: pod
         nodes_per_group: 4
+        port_layout:
+          base_lane_bandwidth_gb: 1
+          total_lane_units: 128
+          supported_port_modes:
+            - port_bandwidth_gb: 1
+              lane_units: 1
+
+      - name: core
+        placement: global
+        nodes_per_group: 2
         port_layout:
           base_lane_bandwidth_gb: 1
           total_lane_units: 128
@@ -151,12 +161,18 @@ fabrics:
     links:
       - from: gpu_nodes
         to: leaf
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 3
         cable_bandwidth_gb: 1
 
       - from: leaf
         to: spine
-        policy: group_to_global_full_mesh
+        policy: to_ancestor_full_mesh
+        cables_per_pair: 1
+        cable_bandwidth_gb: 1
+
+      - from: spine
+        to: core
+        policy: to_global_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 1

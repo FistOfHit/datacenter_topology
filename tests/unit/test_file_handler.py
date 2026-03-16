@@ -118,11 +118,11 @@ def test_load_config_rejects_policy_placement_mismatch(tmp_path, sample_config):
     config_file = tmp_path / "invalid.yaml"
     invalid_config = dict(sample_config)
     invalid_links = [dict(link) for link in sample_config["links"]]
-    invalid_links[1]["policy"] = "within_group_full_mesh"
+    invalid_links[1]["policy"] = "same_scope_full_mesh"
     invalid_config["links"] = invalid_links
     yaml.safe_dump(invalid_config, config_file.open("w", encoding="utf-8"))
 
-    with pytest.raises(InvalidTopologyConfig, match="within_group_full_mesh requires both layers"):
+    with pytest.raises(InvalidTopologyConfig, match="same_scope_full_mesh requires both layers"):
         load_config_from_file(str(config_file))
 
 

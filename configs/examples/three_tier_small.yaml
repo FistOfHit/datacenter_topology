@@ -52,18 +52,18 @@ layers:
 links:
   - from: compute
     to: leaf
-    policy: within_group_full_mesh
+    policy: same_scope_full_mesh
     cables_per_pair: 1
     cable_bandwidth_gb: 400
 
   - from: leaf
     to: spine
-    policy: within_group_full_mesh
+    policy: same_scope_full_mesh
     cables_per_pair: 8
     cable_bandwidth_gb: 400
 
   - from: spine
     to: core
-    policy: group_to_global_full_mesh
+    policy: to_global_full_mesh
     cables_per_pair: 1
     cable_bandwidth_gb: 400

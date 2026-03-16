@@ -5,9 +5,10 @@ from decimal import Decimal
 
 
 SUPPORTED_LINK_POLICIES = {
-    "within_group_full_mesh",
-    "group_to_global_full_mesh",
-    "global_to_global_full_mesh",
+    "same_scope_full_mesh",
+    "to_ancestor_full_mesh",
+    "to_global_full_mesh",
+    "global_full_mesh",
 }
 
 LEGACY_LAYER_PORT_KEYS = {
@@ -17,7 +18,6 @@ LEGACY_LAYER_PORT_KEYS = {
 
 GPU_NODES_LAYER_NAME = "gpu_nodes"
 DEFAULT_SINGLE_FABRIC_NAME = "default"
-MULTI_FABRIC_GROUP_PLACEMENT = "group"
 
 
 def bandwidth_decimal(value: float) -> Decimal:

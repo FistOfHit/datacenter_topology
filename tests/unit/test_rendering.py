@@ -4,10 +4,18 @@ from types import SimpleNamespace
 
 import matplotlib.image as mpimg
 import networkx as nx
+import pytest
 
 import topology_generator.render_environment as render_environment
-from topology_generator.topology_generator import generate_topology
-from topology_generator.render_drawing import get_fanout_annotation
+import topology_generator.render_drawing as render_drawing
+from topology_generator.topology_generator import generate_topology, get_fabric_view
+from topology_generator.render_drawing import (
+    AGGREGATE_BANDWIDTH_LEGEND_LABEL,
+    AGGREGATE_BANDWIDTH_LEGEND_MARKER,
+    TITLE_FONT_SIZE,
+    build_legend_elements,
+    get_fanout_annotation,
+)
 from topology_generator.render_environment import ensure_matplotlib_environment
 from topology_generator.render_formatting import (
     LINK_COLOR_PALETTE,
@@ -34,7 +42,76 @@ from topology_generator.render_layout import (
     get_leftmost_visible_nodes_by_layer,
     select_visible_group_indices,
 )
-from topology_generator.rendering import visualize_topology
+from topology_generator.rendering import build_topology_title, visualize_topology
+
+
+def _port_layout(
+    base_lane_bandwidth_gb: float,
+    total_lane_units: int,
+    supported_modes: list[tuple[float, int]],
+) -> dict[str, object]:
+    return {
+        "base_lane_bandwidth_gb": base_lane_bandwidth_gb,
+        "total_lane_units": total_lane_units,
+        "supported_port_modes": [
+            {
+                "port_bandwidth_gb": port_bandwidth_gb,
+                "lane_units": lane_units,
+            }
+            for port_bandwidth_gb, lane_units in supported_modes
+        ],
+    }
+
+
+def _mixed_scope_oob_config(total_nodes: int = 8) -> dict[str, object]:
+    return {
+        "groupings": [
+            {"name": "pod", "members_per_group": 4},
+            {"name": "rack", "members_per_group": 2},
+        ],
+        "gpu_nodes": {
+            "total_nodes": total_nodes,
+            "fabric_port_layouts": {
+                "oob": _port_layout(100, 1, [(100, 1)]),
+            },
+        },
+        "fabrics": [
+            {
+                "name": "oob",
+                "gpu_nodes_placement": "rack",
+                "layers": [
+                    {
+                        "name": "leaf",
+                        "placement": "rack",
+                        "nodes_per_group": 1,
+                        "port_layout": _port_layout(100, 4, [(100, 1), (200, 2)]),
+                    },
+                    {
+                        "name": "spine",
+                        "placement": "pod",
+                        "nodes_per_group": 1,
+                        "port_layout": _port_layout(100, 4, [(200, 2)]),
+                    },
+                ],
+                "links": [
+                    {
+                        "from": "gpu_nodes",
+                        "to": "leaf",
+                        "policy": "same_scope_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 100,
+                    },
+                    {
+                        "from": "leaf",
+                        "to": "spine",
+                        "policy": "to_ancestor_full_mesh",
+                        "cables_per_pair": 1,
+                        "cable_bandwidth_gb": 200,
+                    },
+                ],
+            }
+        ],
+    }
 
 
 def test_format_bandwidth():
@@ -88,6 +165,28 @@ def test_node_box_geometry_fits_text_stack():
     assert abs(geometry.ports_label_y_offset) < geometry.half_height
     assert geometry.width > 1.9
     assert geometry.height > 1.2
+    assert geometry.aggregate_x_offset == -2.35
+    assert geometry.aggregate_left_extent == 3.35
+
+
+def test_build_topology_title_formats_single_and_multi_fabric_titles():
+    assert build_topology_title() == "Network Topology"
+    assert build_topology_title("backend") == "backend topology"
+
+
+def test_build_legend_elements_includes_aggregate_bandwidth_entry(two_pod_dense_config):
+    legend_elements = build_legend_elements(generate_topology(two_pod_dense_config))
+    labels = [legend_handle.get_label() for legend_handle in legend_elements]
+    aggregate_legend_handle = next(
+        legend_handle
+        for legend_handle in legend_elements
+        if legend_handle.get_label() == AGGREGATE_BANDWIDTH_LEGEND_LABEL
+    )
+
+    assert "Cable count" in labels
+    assert AGGREGATE_BANDWIDTH_LEGEND_LABEL in labels
+    assert aggregate_legend_handle.get_marker() == AGGREGATE_BANDWIDTH_LEGEND_MARKER
+    assert TITLE_FONT_SIZE == 16
 
 
 def test_get_fanout_annotation_uses_total_cable_count():
@@ -296,6 +395,163 @@ def test_group_bandwidth_arrow_stays_inside_pod_and_near_rightmost_node(
     assert (pod_right_edge - arrow_x) >= 0.45
 
 
+def test_draw_group_bandwidth_arrows_emits_ancestor_scope_arrows_for_mixed_scope(
+    monkeypatch,
+):
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config()), "oob")
+    layout_result = calculate_layout(graph)
+    calls: list[tuple[float, float, float, float]] = []
+
+    monkeypatch.setattr(
+        render_drawing,
+        "add_layer_bandwidth_arrow",
+        lambda ax, y1, y2, bandwidth_gb, x_pos: calls.append(
+            (y1, y2, bandwidth_gb, x_pos)
+        ),
+    )
+
+    render_drawing.draw_group_bandwidth_arrows(graph, object(), layout_result)
+
+    ancestor_calls = [
+        (y1, y2, bandwidth_gb, x_pos)
+        for y1, y2, bandwidth_gb, x_pos in calls
+        if y1 == pytest.approx(layout_result.layer_heights[1])
+        and y2 == pytest.approx(layout_result.layer_heights[2])
+    ]
+
+    assert len(ancestor_calls) == 2
+    assert all(bandwidth_gb == pytest.approx(400.0) for _, _, bandwidth_gb, _ in ancestor_calls)
+    assert len({round(x_pos, 3) for _, _, _, x_pos in ancestor_calls}) == 2
+
+
+def test_multi_scope_layout_spreads_visible_pods_far_apart():
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
+    layout = calculate_layout(graph)
+
+    pod_scoped_centers = sorted(
+        pos[0]
+        for node, pos in layout.positions.items()
+        if graph.nodes[node].get("placement_scope") == "pod"
+    )
+    pod_center_gap = pod_scoped_centers[-1] - pod_scoped_centers[0]
+
+    assert pod_center_gap >= 40.0
+    assert layout.profile.figure_width == 36.0
+
+
+def test_multi_scope_layout_keeps_rack_box_inside_pod_and_contains_left_aggregate_labels():
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
+    layout = calculate_layout(graph)
+    pod_bound = next(bound for bound in layout.group_bounds if bound[4] == "pod_1")
+    rack_bound = min(
+        (bound for bound in layout.group_bounds if bound[4] == "rack_1"),
+        key=lambda bound: bound[0],
+    )
+
+    pod_left, pod_bottom, pod_width, _ = pod_bound[:4]
+    _, rack_bottom, _, _ = rack_bound[:4]
+
+    assert rack_bottom > pod_bottom
+
+    leftmost_node = min(
+        (
+            node
+            for node in layout.visible_nodes
+            if graph.nodes[node].get("scope_labels", ())[:1] == ("pod_1",)
+        ),
+        key=lambda node: layout.positions[node][0],
+    )
+    leftmost_node_x = layout.positions[leftmost_node][0]
+
+    assert pod_left < leftmost_node_x - 3.0
+    assert pod_left + pod_width > leftmost_node_x
+
+
+def test_multi_scope_group_bandwidth_arrows_separate_rack_and_pod_lanes(monkeypatch):
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
+    layout = calculate_layout(graph)
+    calls: list[tuple[float, float, float, float]] = []
+
+    monkeypatch.setattr(
+        render_drawing,
+        "add_layer_bandwidth_arrow",
+        lambda ax, y1, y2, bandwidth_gb, x_pos: calls.append(
+            (y1, y2, bandwidth_gb, x_pos)
+        ),
+    )
+
+    render_drawing.draw_group_bandwidth_arrows(graph, object(), layout)
+
+    rightmost_pod_bound = max(
+        (bound for bound in layout.group_bounds if bound[4] == "pod_4"),
+        key=lambda bound: bound[0],
+    )
+    pod_right = rightmost_pod_bound[0] + rightmost_pod_bound[2]
+    rightmost_rack_bound = max(
+        (
+            bound
+            for bound in layout.group_bounds
+            if bound[4].startswith("rack_") and bound[0] > rightmost_pod_bound[0]
+        ),
+        key=lambda bound: bound[0],
+    )
+    rack_right = rightmost_rack_bound[0] + rightmost_rack_bound[2]
+    rack_calls = [x_pos for _, _, bandwidth_gb, x_pos in calls if bandwidth_gb == pytest.approx(200.0)]
+    pod_calls = [x_pos for _, _, bandwidth_gb, x_pos in calls if bandwidth_gb == pytest.approx(400.0)]
+
+    assert rack_calls
+    assert pod_calls
+    assert max(rack_calls) < rack_right
+    assert rack_right < max(pod_calls) < pod_right
+
+
+def test_multi_scope_uses_local_labels_for_nested_scope_boxes():
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
+    layout = calculate_layout(graph)
+    labels = [label for _, _, _, _, label in layout.group_bounds]
+
+    assert "pod_1" in labels
+    assert "rack_1" in labels
+    assert "pod_1_rack_1" not in labels
+
+
+def test_multi_scope_global_annotation_column_starts_right_of_group_arrow_labels(monkeypatch):
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
+    layout = calculate_layout(graph)
+    calls: list[tuple[float, float, float, float]] = []
+
+    monkeypatch.setattr(
+        render_drawing,
+        "add_layer_bandwidth_arrow",
+        lambda ax, y1, y2, bandwidth_gb, x_pos: calls.append(
+            (y1, y2, bandwidth_gb, x_pos)
+        ),
+    )
+
+    render_drawing.draw_group_bandwidth_arrows(graph, object(), layout)
+
+    rightmost_group_arrow = max(x_pos for _, _, _, x_pos in calls)
+    rightmost_group_bound = max(left + width for left, _, width, _, _ in layout.group_bounds)
+    assert layout.layer_bandwidth_x > rightmost_group_arrow + 0.6
+    assert layout.layer_bandwidth_x > rightmost_group_bound + 0.5
+
+
+def test_multi_scope_hidden_pod_placeholder_stays_between_visible_pod_bounds():
+    graph = get_fabric_view(generate_topology(_mixed_scope_oob_config(total_nodes=16)), "oob")
+    layout = calculate_layout(graph)
+    pod_bounds = sorted(
+        (bound for bound in layout.group_bounds if bound[4] in {"pod_1", "pod_4"}),
+        key=lambda bound: bound[0],
+    )
+    left_pod, right_pod = pod_bounds
+    center_placeholder = next(placeholder for placeholder in layout.placeholder_labels if placeholder[2] == "...")
+    left_gap_edge = left_pod[0] + left_pod[2]
+    right_gap_edge = right_pod[0]
+
+    assert abs(center_placeholder[0] - left_gap_edge) > 1.0
+    assert abs(center_placeholder[0] - right_gap_edge) > 1.0
+
+
 def test_compute_annotation_column_tracks_content_width(two_pod_dense_config):
     layout = calculate_layout(generate_topology(two_pod_dense_config))
     annotation_x = compute_annotation_columns(
@@ -452,11 +708,11 @@ def test_visualize_topology_normalizes_fabric_name_in_output_filename(tmp_path):
         "fabrics": [
             {
                 "name": "front/end",
-                "grouping": "pod",
+                "gpu_nodes_placement": "pod",
                 "layers": [
                     {
                         "name": "leaf",
-                        "placement": "group",
+                        "placement": "pod",
                         "nodes_per_group": 1,
                         "port_layout": {
                             "base_lane_bandwidth_gb": 100,
@@ -474,7 +730,7 @@ def test_visualize_topology_normalizes_fabric_name_in_output_filename(tmp_path):
                     {
                         "from": "gpu_nodes",
                         "to": "leaf",
-                        "policy": "within_group_full_mesh",
+                        "policy": "same_scope_full_mesh",
                         "cables_per_pair": 1,
                         "cable_bandwidth_gb": 100,
                     }

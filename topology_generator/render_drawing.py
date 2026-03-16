@@ -27,6 +27,7 @@ from topology_generator.render_layout import (
     build_render_summary,
     calculate_plot_limits,
     compute_group_bandwidth_arrow_x,
+    estimate_text_width,
     get_leftmost_visible_nodes_by_layer,
     layer_bandwidth_from_summary,
 )
@@ -34,9 +35,46 @@ from topology_generator.render_types import LayoutResult, NodeBoxGeometry, Rende
 
 logger = logging.getLogger(__name__)
 
+AGGREGATE_BANDWIDTH_LEGEND_LABEL = "per node agg uplink/downlink BW"
+AGGREGATE_BANDWIDTH_LEGEND_MARKER = "$↑/↓$"
+TITLE_FONT_SIZE = 16
+
 
 def _mpl():
     return load_matplotlib()
+
+
+def build_legend_elements(graph: nx.Graph) -> list[Any]:
+    mpl = _mpl()
+    legend_elements = [
+        mpl.Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor="w",
+            markeredgecolor="black",
+            markersize=10,
+            label="Cable count",
+        ),
+        mpl.Line2D(
+            [0],
+            [0],
+            color="black",
+            linestyle="None",
+            marker=AGGREGATE_BANDWIDTH_LEGEND_MARKER,
+            markersize=12,
+            label=AGGREGATE_BANDWIDTH_LEGEND_LABEL,
+        ),
+    ]
+    for bandwidth, color in get_bandwidth_colors(graph).items():
+        legend_elements.append(
+            mpl.Patch(
+                facecolor=color,
+                label=format_bandwidth(float(bandwidth)),
+            )
+        )
+    return legend_elements
 
 
 def draw_arrow_symbol(
@@ -191,9 +229,7 @@ def get_fanout_annotation(
         theta1 = min(visible_angles) - 8.0
         theta2 = max(visible_angles) + 8.0
 
-    label_padding = geometry.fanout_radius_padding + 0.28
-    if (theta2 - theta1) <= geometry.fanout_narrow_span_threshold_deg:
-        label_padding += geometry.fanout_narrow_extra_padding
+    label_padding = geometry.fanout_radius_padding + 0.34
 
     mid_angle = math.radians((theta1 + theta2) / 2)
     arc_mid_x = x + (geometry.fanout_arc_width / 2) * math.cos(mid_angle)
@@ -232,6 +268,7 @@ def draw_fanout_annotations(
     geometry: NodeBoxGeometry,
 ) -> None:
     mpl = _mpl()
+    occupied_label_boxes: list[tuple[float, float, float, float]] = []
     for node in get_leftmost_visible_nodes_by_layer(graph, pos, visible_nodes).values():
         for direction in ("up", "down"):
             annotation = get_fanout_annotation(
@@ -244,6 +281,11 @@ def draw_fanout_annotations(
             )
             if not annotation:
                 continue
+            label_x, label_y, label_box = _resolve_fanout_label_position(
+                annotation,
+                occupied_label_boxes,
+            )
+            occupied_label_boxes.append(label_box)
 
             arc = mpl.Arc(
                 annotation["center"],
@@ -257,8 +299,8 @@ def draw_fanout_annotations(
             )
             ax.add_patch(arc)
             ax.text(
-                annotation["label_pos"][0],
-                annotation["label_pos"][1],
+                label_x,
+                label_y,
                 annotation["label"],
                 fontsize=FANOUT_LABEL_FONT_SIZE,
                 ha="center",
@@ -336,6 +378,9 @@ def draw_group_bandwidth_arrows(
     layout: LayoutResult,
     render_summary: RenderSummary | None = None,
 ) -> None:
+    if any(len(data.get("scope_key", ())) > 1 for _, data in graph.nodes(data=True)):
+        _draw_multi_scope_bandwidth_arrows(graph, ax, layout)
+        return
     if not layout.group_bounds:
         return
 
@@ -384,6 +429,167 @@ def draw_group_bandwidth_arrows(
             bandwidth,
             x_pos,
         )
+
+
+def _draw_multi_scope_bandwidth_arrows(
+    graph: nx.Graph,
+    ax: Any,
+    layout: LayoutResult,
+) -> None:
+    geometry = layout.profile.node_box
+    bandwidths_by_scope_and_layer: dict[tuple[tuple[tuple[str, int], ...], int, int], float] = {}
+
+    for source, target, attrs in graph.edges(data=True):
+        source_data = node_attrs(graph, source)
+        target_data = node_attrs(graph, target)
+        lower_layer_index = min(source_data["layer_index"], target_data["layer_index"])
+        upper_layer_index = max(source_data["layer_index"], target_data["layer_index"])
+        shared_scope_key = _shared_scope_key(
+            source_data.get("scope_key", ()),
+            target_data.get("scope_key", ()),
+        )
+        if not shared_scope_key:
+            continue
+        key = (shared_scope_key, lower_layer_index, upper_layer_index)
+        bandwidths_by_scope_and_layer[key] = (
+            bandwidths_by_scope_and_layer.get(key, 0.0)
+            + (cable_bandwidth_gb(attrs) * cable_count(attrs))
+        )
+
+    for (scope_key, lower_layer_index, upper_layer_index), bandwidth in sorted(
+        bandwidths_by_scope_and_layer.items(),
+        key=lambda item: (len(item[0][0]), item[0][1], item[0][2], item[0][0]),
+    ):
+        scope_bound = _find_scope_bound(layout, graph, scope_key)
+        descendant_nodes = [
+            node
+            for node in layout.visible_nodes
+            if _scope_is_prefix(node_attrs(graph, node).get("scope_key", ()), scope_key)
+            and node_attrs(graph, node)["layer_index"] in (lower_layer_index, upper_layer_index)
+        ]
+        if not descendant_nodes:
+            continue
+        base_x = (
+            max(layout.positions[node][0] + (geometry.width / 2) for node in descendant_nodes)
+            + 0.18
+        )
+        if scope_bound is not None:
+            scope_right = scope_bound[0] + scope_bound[2]
+            label_width = estimate_text_width(format_bandwidth(bandwidth), layout.profile)
+            x_pos = min(
+                scope_right - 0.45 - 0.22 - label_width,
+                scope_right - 0.9,
+            )
+            x_pos = max(base_x, x_pos)
+        else:
+            x_pos = base_x
+        add_layer_bandwidth_arrow(
+            ax,
+            layout.layer_heights[lower_layer_index],
+            layout.layer_heights[upper_layer_index],
+            bandwidth,
+            x_pos,
+        )
+
+
+def _shared_scope_key(
+    left_scope_key: tuple[tuple[str, int], ...],
+    right_scope_key: tuple[tuple[str, int], ...],
+) -> tuple[tuple[str, int], ...]:
+    shared_parts: list[tuple[str, int]] = []
+    for left_part, right_part in zip(left_scope_key, right_scope_key):
+        if left_part != right_part:
+            break
+        shared_parts.append(left_part)
+    return tuple(shared_parts)
+
+
+def _scope_is_prefix(
+    candidate_scope_key: tuple[tuple[str, int], ...],
+    prefix_scope_key: tuple[tuple[str, int], ...],
+) -> bool:
+    return candidate_scope_key[: len(prefix_scope_key)] == prefix_scope_key
+
+
+def _find_scope_bound(
+    layout: LayoutResult,
+    graph: nx.Graph,
+    scope_key: tuple[tuple[str, int], ...],
+) -> tuple[float, float, float, float, str] | None:
+    if not scope_key:
+        return None
+    descendant_nodes = [
+        node
+        for node in layout.visible_nodes
+        if _scope_is_prefix(node_attrs(graph, node).get("scope_key", ()), scope_key)
+    ]
+    if not descendant_nodes:
+        return None
+    scope_center_x = sum(layout.positions[node][0] for node in descendant_nodes) / len(descendant_nodes)
+    label = f"{scope_key[-1][0]}_{scope_key[-1][1]}"
+    candidate_bounds = [bound for bound in layout.group_bounds if bound[4] == label]
+    if not candidate_bounds:
+        return None
+    if len(candidate_bounds) == 1:
+        return candidate_bounds[0]
+
+    return min(
+        candidate_bounds,
+        key=lambda bound: abs((bound[0] + (bound[2] / 2)) - scope_center_x),
+    )
+
+
+def _resolve_fanout_label_position(
+    annotation: FanoutAnnotation,
+    occupied_boxes: list[tuple[float, float, float, float]],
+) -> tuple[float, float, tuple[float, float, float, float]]:
+    label_x, label_y = annotation["label_pos"]
+    center_x, center_y = annotation["center"]
+    vector_x = label_x - center_x
+    vector_y = label_y - center_y
+    vector_length = max(0.001, math.hypot(vector_x, vector_y))
+    unit_x = vector_x / vector_length
+    unit_y = vector_y / vector_length
+    label_half_width = max(0.62, len(annotation["label"]) * 0.085)
+    label_half_height = 0.18
+
+    for _ in range(8):
+        candidate_box = (
+            label_x - label_half_width,
+            label_x + label_half_width,
+            label_y - label_half_height,
+            label_y + label_half_height,
+        )
+        if not any(_boxes_overlap(candidate_box, occupied_box) for occupied_box in occupied_boxes):
+            return label_x, label_y, candidate_box
+        label_x += unit_x * 0.34
+        label_y += unit_y * 0.22
+
+    return (
+        label_x,
+        label_y,
+        (
+            label_x - label_half_width,
+            label_x + label_half_width,
+            label_y - label_half_height,
+            label_y + label_half_height,
+        ),
+    )
+
+
+def _boxes_overlap(
+    left_box: tuple[float, float, float, float],
+    right_box: tuple[float, float, float, float],
+    padding: float = 0.06,
+) -> bool:
+    left_left, left_right, left_bottom, left_top = left_box
+    right_left, right_right, right_bottom, right_top = right_box
+    return not (
+        left_right + padding < right_left
+        or right_right + padding < left_left
+        or left_top + padding < right_bottom
+        or right_top + padding < left_bottom
+    )
 
 
 def visualize_single_topology(
@@ -512,32 +718,15 @@ def visualize_single_topology(
             )
 
     draw_group_bandwidth_arrows(graph, ax, layout, render_summary)
-
-    legend_elements = [
-        mpl.Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor="w",
-            markeredgecolor="black",
-            markersize=10,
-            label="Cable count",
-        )
-    ]
-    for bandwidth, color in bandwidth_colors.items():
-        legend_elements.append(
-            mpl.Patch(
-                facecolor=color,
-                label=format_bandwidth(float(bandwidth)),
-            )
-        )
-
-    ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(0.01, 0.99))
+    ax.legend(
+        handles=build_legend_elements(graph),
+        loc="upper left",
+        bbox_to_anchor=(0.01, 0.99),
+    )
 
     mpl.plt.xlim(*x_limits)
     mpl.plt.ylim(*y_limits)
-    mpl.plt.title(title)
+    mpl.plt.title(title, fontsize=TITLE_FONT_SIZE)
     mpl.plt.axis("off")
 
     if output_dir:

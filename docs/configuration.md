@@ -48,8 +48,9 @@ Layer order defines the topology:
 ## Groupings
 
 `groupings` is only used in multi-fabric mode. It defines reusable partitions over the
-shared `gpu_nodes` population in one place so each fabric can choose which grouping it
-uses.
+shared `gpu_nodes` population in one place so each fabric can declare how it views that
+shared layer through `gpu_nodes_placement` and can place later layers explicitly at
+`rack`, `pod`, or `global`.
 
 Example:
 
@@ -65,7 +66,7 @@ Rules:
 
 - `name` is required, unique, and must remain unique after identifier normalization.
 - `name` must contain at least one alphanumeric character.
-- `global`, `group`, and `gpu_nodes` are reserved names and must not be used.
+- `global` and `gpu_nodes` are reserved names and must not be used.
 - `members_per_group` is required and must be greater than zero.
 - every `members_per_group` value must divide `gpu_nodes.total_nodes` exactly.
 - grouping sizes must form a clean nesting chain by divisibility.
@@ -139,15 +140,15 @@ Every layer requires:
 - `port_layout`
 
 In multi-fabric mode, `layers:` live inside `fabrics[*]` and do not include `gpu_nodes`.
-Fabrics choose one grouping namespace with `fabrics[*].grouping`, and grouped fabric-local
-layers use `placement: group`.
+Fabrics declare `fabrics[*].gpu_nodes_placement`, and every fabric-local layer uses a
+literal `placement` such as `rack`, `pod`, or `global`.
 
 Example:
 
 ```yaml
 layers:
   - name: leaf
-    placement: group
+    placement: pod
     nodes_per_group: 8
     port_layout:
       base_lane_bandwidth_gb: 400
@@ -167,8 +168,10 @@ Rules:
 - For `placement: global`, `nodes_per_group` means total nodes in that global layer.
 - legacy `ports_per_node` and `port_bandwidth_gb_per_port` are no longer accepted.
 - in single-fabric mode, `placement` must be either `global` or the declared group name.
-- in multi-fabric mode, `placement` must be either `global` or `group`
+- in multi-fabric mode, `placement` must be either `global` or one declared grouping name
 - in multi-fabric mode, no fabric-local layer may be named `gpu_nodes`
+- in multi-fabric mode, placements must widen monotonically upward: same scope,
+  ancestor scope, or `global`
 
 ### `port_layout`
 
@@ -212,7 +215,7 @@ Example:
 links:
   - from: leaf
     to: spine
-    policy: group_to_global_full_mesh
+    policy: to_global_full_mesh
     cables_per_pair: 1
     cable_bandwidth_gb: 800
 ```
@@ -231,18 +234,26 @@ Rules:
 
 ### Supported policies
 
-`within_group_full_mesh`
+`same_scope_full_mesh`
 
 - both layers must share the same non-global placement
-- every node in a group instance connects to every node in the next layer within the same group instance
+- every node in a scope instance connects to every node in the next layer within
+  the same scope instance
 
-`group_to_global_full_mesh`
+`to_ancestor_full_mesh`
+
+- both layers must be non-global
+- target placement must be a strict ancestor of the source placement
+- every source node connects to every target node in its containing ancestor
+  scope instance
+
+`to_global_full_mesh`
 
 - source layer must be grouped
 - target layer must be global
 - every grouped source node connects to every global target node
 
-`global_to_global_full_mesh`
+`global_full_mesh`
 
 - both layers must be global
 - every node in the lower layer connects to every node in the next global layer
@@ -259,13 +270,14 @@ Validation happens in two passes.
 - fabric names must be unique
 - normalized group, grouping, layer, and fabric identifiers must remain unique in their scopes
 - expanded node IDs implied by group, layer, and ordinal names must remain unique after normalization
-- placements must reference `global`, the declared single-fabric group name, or `group` depending on the active config shape
+- placements must reference `global`, the declared single-fabric group name, or
+  one declared grouping name depending on the active config shape
 - link policies must be compatible with endpoint placements
 - links must connect adjacent layers only
 - link bandwidth must be supported by both endpoint layers
 - `gpu_nodes.fabric_port_layouts` must match `fabrics[*].name`
 - `gpu_nodes` may not be redefined inside `fabrics[*].layers`
-- `fabrics[*].grouping` must reference a declared grouping
+- `fabrics[*].gpu_nodes_placement` must be `global` or reference a declared grouping
 
 ### Expanded topology validation
 
@@ -293,7 +305,7 @@ Expanded node IDs are stable and literal to the YAML concepts:
 - global nodes: `<layer_name>_<ordinal>`
 - multi-fabric shared endpoints use grouping-neutral physical IDs such as `gpu_nodes_17`
 - multi-fabric internal upper-layer nodes are fabric-qualified to avoid collisions
-- multi-fabric grouped labels are resolved from the selected grouping, such as
+- multi-fabric grouped labels are resolved from the selected placement path, such as
   `backend__pod_1_leaf_3` or `oob__pod_1_rack_2_mgmt_1`
 
 The names are normalized to lowercase identifier form internally for node IDs, but the original YAML layer names are preserved for display in the diagram.
@@ -318,16 +330,16 @@ Example:
 ```yaml
 fabrics:
   - name: backend
-    grouping: pod
+    gpu_nodes_placement: pod
     layers:
       - name: leaf
-        placement: group
+        placement: pod
         nodes_per_group: 8
         port_layout: ...
     links:
       - from: gpu_nodes
         to: leaf
-        policy: within_group_full_mesh
+        policy: same_scope_full_mesh
         cables_per_pair: 1
         cable_bandwidth_gb: 400
 ```
@@ -335,9 +347,12 @@ fabrics:
 Rules:
 
 - `name` is required and must be unique after normalization
-- `grouping` is required and must reference one declared `groupings[*].name`
+- `gpu_nodes_placement` is required and must be either `global` or one declared
+  `groupings[*].name`
 - `layers` must contain at least one fabric-local layer
 - `links` uses the same schema as single-fabric mode
 - every fabric uses the full `gpu_nodes` population in v1
 - only `gpu_nodes` is shared across fabrics in v1
-- old multi-fabric aliases are rejected; use top-level `groupings`, `gpu_nodes.total_nodes`, explicit `fabrics[*].grouping`, and `placement: group` for grouping-relative layers
+- old multi-fabric aliases are rejected; use top-level `groupings`,
+  `gpu_nodes.total_nodes`, explicit `fabrics[*].gpu_nodes_placement`, and
+  literal placement names for grouping-relative layers
